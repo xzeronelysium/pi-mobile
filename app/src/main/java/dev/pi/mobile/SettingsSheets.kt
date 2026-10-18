@@ -631,6 +631,8 @@ internal object PiIcons {
   val check = R.drawable.check_icon
   val back = R.drawable.back_icon
   val attach = R.drawable.attach_icon
+  val folder = R.drawable.folder_icon
+  val file = R.drawable.file_icon
 }
 
 /** The genuine Pi mark with no wordmark beside it. */

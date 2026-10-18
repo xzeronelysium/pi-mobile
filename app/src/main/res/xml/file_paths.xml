@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Paths the workspace file drawer may hand to another app through FileProvider.
+
+  The bound workspace is either app-private (files/), app-external (external-files/), or a real
+  folder under shared storage when All files access is granted (external/). Exposing those roots is
+  the same reach the app already has through MANAGE_EXTERNAL_STORAGE; nothing outside them is
+  offered.
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <files-path name="app_files" path="." />
+    <external-files-path name="app_external" path="." />
+    <external-path name="shared_storage" path="." />
+    <cache-path name="cache" path="." />
+</paths>

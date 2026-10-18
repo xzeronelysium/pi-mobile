@@ -368,7 +368,7 @@ private fun SessionRowItem(row: SessionRow, now: Long, busy: Boolean, onOpen: ()
 }
 
 @Composable
-private fun DrawerTitle(title: String, subtitle: String, trailing: @Composable () -> Unit) {
+internal fun DrawerTitle(title: String, subtitle: String, trailing: @Composable () -> Unit) {
   Row(
     Modifier.fillMaxWidth().padding(start = PiSpace.Screen, end = PiSpace.x1, top = PiSpace.x2, bottom = PiSpace.x2),
     verticalAlignment = Alignment.CenterVertically,
@@ -390,7 +390,7 @@ private fun DrawerTitle(title: String, subtitle: String, trailing: @Composable (
 }
 
 @Composable
-private fun DrawerNote(text: String) {
+internal fun DrawerNote(text: String) {
   Text(
     text,
     style = PiType.Meta,
@@ -401,7 +401,7 @@ private fun DrawerNote(text: String) {
 
 /** The drawer's search field: an icon, an underline, no box. */
 @Composable
-private fun DrawerField(value: String, onValueChange: (String) -> Unit, placeholder: String) {
+internal fun DrawerField(value: String, onValueChange: (String) -> Unit, placeholder: String) {
   Row(
     Modifier.fillMaxWidth().padding(horizontal = PiSpace.Screen),
     verticalAlignment = Alignment.CenterVertically,

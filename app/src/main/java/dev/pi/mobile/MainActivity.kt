@@ -29,6 +29,7 @@ import dev.pi.mobile.chat.ComposerDraft
 import dev.pi.mobile.chat.ComposerSkillUiPolicy
 import dev.pi.mobile.chat.ConversationTree
 import dev.pi.mobile.chat.DurableEvent
+import dev.pi.mobile.chat.FilesActions
 import dev.pi.mobile.chat.InboxState
 import dev.pi.mobile.chat.McpState
 import dev.pi.mobile.chat.ModelKind
@@ -44,6 +45,8 @@ import dev.pi.mobile.chat.SettingsUiState
 import dev.pi.mobile.chat.TranscriptFoldReducer
 import dev.pi.mobile.chat.TranscriptFoldState
 import dev.pi.mobile.chat.UsageState
+import dev.pi.mobile.chat.WorkspaceFilesReducer
+import dev.pi.mobile.chat.WorkspaceFilesState
 import dev.pi.mobile.chat.activeSessionStore
 import dev.pi.mobile.theme.PiAITheme
 
@@ -202,6 +205,12 @@ class MainActivity : ComponentActivity() {
   internal var drawer by mutableStateOf(SessionDrawerState())
   internal var compactInstructions by mutableStateOf("")
 
+  /** The left-edge workspace file drawer: folder, listing, filter and any open preview. */
+  internal var files by mutableStateOf(WorkspaceFilesState())
+  /** Bumped on every listing/preview so a slow read cannot replace a newer folder or file. */
+  internal var filesLoadEpoch = 0L
+  internal var previewLoadEpoch = 0L
+
   /** The app-owned commands the host discovered: skills (durable extensions) and templates. */
   internal var commands by mutableStateOf(CommandCatalog(loading = true))
 
@@ -262,6 +271,21 @@ class MainActivity : ComponentActivity() {
     resetContext = { runtime?.resetSession(null) },
   )
 
+  /** The file drawer's callbacks, mirroring [sessionActions]' shape. */
+  internal val filesActions = FilesActions(
+    open = ::openFiles,
+    close = ::closeFiles,
+    setQuery = { files = WorkspaceFilesReducer.setQuery(files, it) },
+    navigate = ::navigateFiles,
+    refresh = { loadFiles(files.path) },
+    openFile = ::openFilePreview,
+    closePreview = ::closeFilePreview,
+    attach = ::attachWorkspaceFile,
+    copyPath = ::copyWorkspacePath,
+    share = ::shareWorkspaceFile,
+    openWith = ::openWorkspaceFileWith,
+  )
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     settingsState = preferences.restore()
@@ -292,6 +316,8 @@ class MainActivity : ComponentActivity() {
           usage = usage,
           inbox = inbox,
           drawer = drawer,
+          files = files,
+          filesActions = filesActions,
           compactInstructions = compactInstructions,
           commands = commands,
           mcp = mcp,
@@ -366,6 +392,10 @@ class MainActivity : ComponentActivity() {
   internal fun startRuntime() {
     // A new workspace cannot read the old one's staged files, so the chips go with it.
     dropStagedForReset()
+    // A drawer pointed at the previous workspace would list or preview the wrong tree.
+    files = WorkspaceFilesState()
+    filesLoadEpoch++
+    previewLoadEpoch++
     val resolved = binding.resolve()
     workspace = resolved
     allFilesAccess = hasAllFilesAccess()

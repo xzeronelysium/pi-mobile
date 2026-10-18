@@ -84,6 +84,40 @@ internal class AttachmentController(
     }
   }
 
+  /**
+   * Stage a file that is already inside the workspace, such as one tapped in the file drawer.
+   * The same limits, sanitization and collision handling apply; the stream is the file itself.
+   */
+  fun stagePath(file: File, mimeType: String?) {
+    val root = stagingRoot() ?: run {
+      notice("Choose a workspace before attaching files.")
+      return
+    }
+    scope.launch {
+      val chips = attachments()
+      val staged = withContext(Dispatchers.IO) {
+        AttachmentStaging.stage(
+          stagingRoot = root,
+          displayName = file.name,
+          mimeType = mimeType,
+          sizeHint = file.length(),
+          openStream = { file.inputStream() },
+          existingCount = chips.size,
+          existingTotalBytes = chips.sumOf { it.sizeBytes },
+        )
+      }
+      staged.fold(
+        onSuccess = { attachment ->
+          ChatAttachmentReducer.add(chips, attachment).fold(
+            onSuccess = { update(it) },
+            onFailure = { notice(it.message ?: "Attachment rejected") },
+          )
+        },
+        onFailure = { notice(it.message ?: "Attachment rejected") },
+      )
+    }
+  }
+
   /** A picked document's display name and declared size, when the provider publishes them. */
   private fun queryPicked(uri: Uri): Pair<String?, Long?> {
     val cursor = runCatching {

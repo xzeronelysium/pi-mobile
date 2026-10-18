@@ -47,3 +47,5 @@ The build updates the generated asset in `app/src/main/assets/native-runtime/`. 
 The JavaScript runtime is not the platform security boundary. File operations pass through Kotlin adapters with workspace/path checks; shell commands run as the app UID and **are not sandboxed**. The app currently requests `MANAGE_EXTERNAL_STORAGE`, a sensitive permission with Android/Google Play policy implications.
 
 Autonomous JavaScript runs in a separate Worker without the `AndroidNative` bridge and only receives declared inputs/outputs. This narrows access but does not make arbitrary third-party code trustworthy. See the [README security notes](../README.md#security-and-permissions) before installing or using the app with sensitive data.
+
+The workspace file drawer hands a file to another app only through a read-only `FileProvider` URI with a one-shot read grant. Its configured paths cover the app's own files, app-external files, and shared storage — the same roots the workspace binding can use.

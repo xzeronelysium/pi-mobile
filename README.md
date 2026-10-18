@@ -7,7 +7,9 @@ Pi Mobile is an actively developed Android client for Pi AI, built with Kotlin a
 ## Features today
 
 - **Chat and sessions** — start conversations, revisit session history, and work with session trees.
-- **File-aware workspace** — attach files and use the app's Android workspace tools.
+- **File-aware workspace** — attach files and use the app's Android workspace tools, plus a
+  left-edge file drawer for browsing the bound workspace, previewing text, Markdown, code and
+  images inline, and staging any file into the prompt.
 - **Provider connections** — API-key setup and supported OAuth flows, depending on provider and device capabilities.
 - **Android-native runtime** — Kotlin file and SQLite adapters, bounded shell execution and streaming through Android's `/system/bin/sh` (`mksh`), and provider networking.
 - **Agent tools and integrations** — URL fetching, script execution, browser JavaScript packages in an isolated Worker, HTTP MCP, app resources, and durable workflows.

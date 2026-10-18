@@ -82,6 +82,24 @@ internal class SessionActions(
   val resetContext: () -> Unit,
 )
 
+/**
+ * Everything the left-edge file drawer asks the Activity to do. Kept beside [SessionActions] so the
+ * screen's signature stays one argument per surface, not one per callback.
+ */
+internal class FilesActions(
+  val open: () -> Unit,
+  val close: () -> Unit,
+  val setQuery: (String) -> Unit,
+  val navigate: (String) -> Unit,
+  val refresh: () -> Unit,
+  val openFile: (WorkspaceEntry) -> Unit,
+  val closePreview: () -> Unit,
+  val attach: (WorkspaceEntry) -> Unit,
+  val copyPath: (WorkspaceEntry) -> Unit,
+  val share: (WorkspaceEntry) -> Unit,
+  val openWith: (WorkspaceEntry) -> Unit,
+)
+
 // ---------------------------------------------------------------------------
 // Presentation
 // ---------------------------------------------------------------------------
@@ -102,6 +120,8 @@ internal fun ChatScreen(
   usage: UsageState,
   inbox: InboxState,
   drawer: SessionDrawerState,
+  files: WorkspaceFilesState,
+  filesActions: FilesActions,
   compactInstructions: String,
   commands: CommandCatalog,
   mcp: McpState,
@@ -145,6 +165,14 @@ internal fun ChatScreen(
   onMcpDraftUrl: (String) -> Unit = {},
 ) {
   val historyDrawer = rememberDrawerState(DrawerValue.Closed)
+  // The file drawer is the history drawer's mirror: a left-edge sheet driven by its own reducer.
+  val filesDrawer = rememberDrawerState(DrawerValue.Closed)
+  LaunchedEffect(files.open) {
+    if (files.open) filesDrawer.open() else filesDrawer.close()
+  }
+  LaunchedEffect(filesDrawer.isOpen) {
+    if (!filesDrawer.isOpen && files.open) filesActions.close()
+  }
   // The drawer opens only from the history glyph, so the pure state drives the animation; a swipe
   // or a tap on the dim reports itself back here.
   LaunchedEffect(drawer.open) {
@@ -165,113 +193,154 @@ internal fun ChatScreen(
   // The drawer's *container* takes the contract's Rtl: material anchors the sheet to the
   // composition's leading edge, so Rtl makes the leading edge the right one and the panel slides
   // in from there. The drawer's own edge places the panel — nothing here animates it by hand.
-  CompositionLocalProvider(LocalLayoutDirection provides SessionDrawerLayout.CONTAINER_DIRECTION) {
+  Box(Modifier.fillMaxSize()) {
+    // The files drawer anchors to the left by default; the history drawer below flips its own
+    // container to Rtl so it anchors right. Both are state-driven and never open together.
     ModalNavigationDrawer(
-      drawerState = historyDrawer,
-      // No edge-swipe open; while open, material's own scrim tap and dismiss drag keep working.
-      gesturesEnabled = historyDrawer.isOpen,
+      drawerState = filesDrawer,
+      gesturesEnabled = filesDrawer.isOpen,
       scrimColor = Color(0x99000000),
       drawerContent = {
-        // The panel and everything in it go back to Ltr, so none of the drawer's own content —
-        // its title, workspace line, search field, rows and date bands — is mirrored.
-        CompositionLocalProvider(LocalLayoutDirection provides SessionDrawerLayout.CONTENT_DIRECTION) {
-          // The container is a square, transparent, zero-inset layout box. Square because material's
-          // own rounded elevated sheet would otherwise show at the panel's corners; transparent
-          // because material applies the sheet's windowInsets to its *content*, inside the surface's
-          // own background — a container colour would still paint the window's full height, under
-          // both system bars. The panel paints itself below its own insets (SessionDrawerLayout).
-          ModalDrawerSheet(
-            drawerShape = RectangleShape,
-            drawerContainerColor = Color.Transparent,
-            windowInsets = WindowInsets(0, 0, 0, 0),
-          ) {
-            HistoryDrawerPanel(
-              workspaceLine = SessionDrawerReducer.workspaceLine(workspace?.label, allFilesAccess),
-              state = drawer,
-              list = sessions,
-              tree = tree,
-              now = now,
-              busy = busy,
-              onQuery = actions.setQuery,
-              onNew = actions.newSession,
-              onSwitch = actions.switchSession,
-              onRename = actions.startRename,
-              onFork = actions.fork,
-              onToggleTree = actions.toggleTree,
-              onOverflow = actions.setOverflow,
-              onExport = actions.export,
-              onCopyLast = actions.copyLast,
-              onClose = actions.closeHistory,
-            )
-          }
+        ModalDrawerSheet(
+          drawerShape = RectangleShape,
+          drawerContainerColor = Color.Transparent,
+          windowInsets = WindowInsets(0, 0, 0, 0),
+        ) {
+          FilesDrawerPanel(
+            workspaceLabel = workspace?.label ?: "app private",
+            rootLabel = workspace?.root?.name ?: "workspace",
+            state = files,
+            onQuery = filesActions.setQuery,
+            onNavigate = filesActions.navigate,
+            onRefresh = filesActions.refresh,
+            onOpenFile = filesActions.openFile,
+            onAttach = filesActions.attach,
+            onClose = filesActions.close,
+          )
         }
       },
     ) {
-      // The app's own content sits inside the Rtl container above and re-provides Ltr here, so the
-      // header, the transcript and the dock keep their left-to-right layout.
-      CompositionLocalProvider(LocalLayoutDirection provides SessionDrawerLayout.CONTENT_DIRECTION) {
-        // The transcript fills the screen and the dock floats over its foot — exactly the approved
-        // stack — so the list's own bottom reserve (the dock's measured height) is what keeps the
-        // newest row clear of the composer.
-        Box(Modifier.fillMaxSize().background(PiBackground)) {
-          Column(Modifier.fillMaxSize()) {
-            Header(
-              title = SessionDrawerReducer.currentName(sessions) ?: "New session",
-              onHistory = { actions.openHistory(false) },
-            )
-            if (transcript.isEmpty()) {
-              EmptySessionState(
-                workspaceLabel = workspace?.label ?: "app private",
-                onAsk = { onDraft("What can you do in this workspace?") },
+      CompositionLocalProvider(LocalLayoutDirection provides SessionDrawerLayout.CONTAINER_DIRECTION) {
+        ModalNavigationDrawer(
+          drawerState = historyDrawer,
+          // No edge-swipe open; while open, material's own scrim tap and dismiss drag keep working.
+          gesturesEnabled = historyDrawer.isOpen,
+          scrimColor = Color(0x99000000),
+          drawerContent = {
+            // The panel and everything in it go back to Ltr, so none of the drawer's own content —
+            // its title, workspace line, search field, rows and date bands — is mirrored.
+            CompositionLocalProvider(LocalLayoutDirection provides SessionDrawerLayout.CONTENT_DIRECTION) {
+              // The container is a square, transparent, zero-inset layout box. Square because material's
+              // own rounded elevated sheet would otherwise show at the panel's corners; transparent
+              // because material applies the sheet's windowInsets to its *content*, inside the surface's
+              // own background — a container colour would still paint the window's full height, under
+              // both system bars. The panel paints itself below its own insets (SessionDrawerLayout).
+              ModalDrawerSheet(
+                drawerShape = RectangleShape,
+                drawerContainerColor = Color.Transparent,
+                windowInsets = WindowInsets(0, 0, 0, 0),
+              ) {
+                HistoryDrawerPanel(
+                  workspaceLine = SessionDrawerReducer.workspaceLine(workspace?.label, allFilesAccess),
+                  state = drawer,
+                  list = sessions,
+                  tree = tree,
+                  now = now,
+                  busy = busy,
+                  onQuery = actions.setQuery,
+                  onNew = actions.newSession,
+                  onSwitch = actions.switchSession,
+                  onRename = actions.startRename,
+                  onFork = actions.fork,
+                  onToggleTree = actions.toggleTree,
+                  onOverflow = actions.setOverflow,
+                  onExport = actions.export,
+                  onCopyLast = actions.copyLast,
+                  onClose = actions.closeHistory,
+                )
+              }
+            }
+          },
+        ) {
+          // The app's own content sits inside the Rtl container above and re-provides Ltr here, so the
+          // header, the transcript and the dock keep their left-to-right layout.
+          CompositionLocalProvider(LocalLayoutDirection provides SessionDrawerLayout.CONTENT_DIRECTION) {
+            // The transcript fills the screen and the dock floats over its foot — exactly the approved
+            // stack — so the list's own bottom reserve (the dock's measured height) is what keeps the
+            // newest row clear of the composer.
+            Box(Modifier.fillMaxSize().background(PiBackground)) {
+              Column(Modifier.fillMaxSize()) {
+                Header(
+                  title = SessionDrawerReducer.currentName(sessions) ?: "New session",
+                  onFiles = filesActions.open,
+                  onHistory = { actions.openHistory(false) },
+                )
+                if (transcript.isEmpty()) {
+                  EmptySessionState(
+                    workspaceLabel = workspace?.label ?: "app private",
+                    onAsk = { onDraft("What can you do in this workspace?") },
+                    onAttach = onAttach,
+                    onSessions = { actions.openHistory(false) },
+                    bottomReservePx = bottomOverlayHeightPx,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                  )
+                } else {
+                  Transcript(
+                    entries = transcript,
+                    fold = fold,
+                    followEpoch = followEpoch,
+                    skills = commands.skills,
+                    onToggleWork = onToggleWork,
+                    onToggleTool = onToggleTool,
+                    onOpenAttachment = onOpenAttachment,
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    bottomOverlayHeightPx = bottomOverlayHeightPx,
+                  )
+                }
+              }
+              // One dock: the metadata row above the input row, the whole thing painted in the transcript's
+              // own colour with no contrasting slab. Staged attachment chips ride above the input, and the
+              // slash autocomplete above those.
+              ComposerDock(
+                dock = dock,
+                draft = draft,
+                busy = busy,
+                ready = ready,
+                followUp = followUp,
+                onDraft = onDraft,
+                onSend = onSend,
+                onFollowUpSend = onFollowUpSend,
+                onToggleFollowUp = onToggleFollowUp,
+                onStop = onStop,
+                onModel = { onMenuEntry(PickerSheet.Model) },
+                onCompact = { contextOpen = true },
+                onQueue = { queueOpen = true; actions.refreshQueue() },
+                attachments = attachments,
                 onAttach = onAttach,
-                onSessions = { actions.openHistory(false) },
-                bottomReservePx = bottomOverlayHeightPx,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-              )
-            } else {
-              Transcript(
-                entries = transcript,
-                fold = fold,
-                followEpoch = followEpoch,
-                skills = commands.skills,
-                onToggleWork = onToggleWork,
-                onToggleTool = onToggleTool,
-                onOpenAttachment = onOpenAttachment,
-                modifier = Modifier.weight(1f).fillMaxWidth(),
-                bottomOverlayHeightPx = bottomOverlayHeightPx,
+                onRemoveAttachment = onRemoveAttachment,
+                slash = { SlashAutocomplete(slashRows) { row -> onInsertCommand(row) } },
+                picker = {
+                  SettingsChevron(open = settings.sheet != null, onToggle = onChevron)
+                },
+                modifier = Modifier.align(Alignment.BottomCenter),
+                onSizeChanged = { bottomOverlayHeightPx = it },
+                workspaceLabel = workspace?.label ?: "app private",
               )
             }
           }
-          // One dock: the metadata row above the input row, the whole thing painted in the transcript's
-          // own colour with no contrasting slab. Staged attachment chips ride above the input, and the
-          // slash autocomplete above those.
-          ComposerDock(
-            dock = dock,
-            draft = draft,
-            busy = busy,
-            ready = ready,
-            followUp = followUp,
-            onDraft = onDraft,
-            onSend = onSend,
-            onFollowUpSend = onFollowUpSend,
-            onToggleFollowUp = onToggleFollowUp,
-            onStop = onStop,
-            onModel = { onMenuEntry(PickerSheet.Model) },
-            onCompact = { contextOpen = true },
-            onQueue = { queueOpen = true; actions.refreshQueue() },
-            attachments = attachments,
-            onAttach = onAttach,
-            onRemoveAttachment = onRemoveAttachment,
-            slash = { SlashAutocomplete(slashRows) { row -> onInsertCommand(row) } },
-            picker = {
-              SettingsChevron(open = settings.sheet != null, onToggle = onChevron)
-            },
-            modifier = Modifier.align(Alignment.BottomCenter),
-            onSizeChanged = { bottomOverlayHeightPx = it },
-            workspaceLabel = workspace?.label ?: "app private",
-          )
         }
       }
+    }
+    // The preview sits above both drawers: closing it returns to the file list, still open.
+    files.preview?.let { preview ->
+      FilePreviewOverlay(
+        preview = preview,
+        onClose = filesActions.closePreview,
+        onAttach = { filesActions.attach(preview.entry) },
+        onCopyPath = { filesActions.copyPath(preview.entry) },
+        onShare = { filesActions.share(preview.entry) },
+        onOpenWith = { filesActions.openWith(preview.entry) },
+      )
     }
   }
 
@@ -313,7 +382,7 @@ internal fun ChatScreen(
  * target from [HeaderHistoryGlyph], so a 16 dp glyph is never a 16 dp target.
  */
 @Composable
-private fun Header(title: String, onHistory: () -> Unit) {
+private fun Header(title: String, onFiles: () -> Unit, onHistory: () -> Unit) {
   Row(
     Modifier
       .fillMaxWidth()
@@ -337,22 +406,51 @@ private fun Header(title: String, onHistory: () -> Unit) {
         overflow = TextOverflow.Ellipsis,
       )
     }
-    Box(
-      modifier = Modifier
-        .widthIn(min = 56.dp)
-        .height(PiSpace.Touch)
-        .clickable(onClick = onHistory),
-      contentAlignment = Alignment.Center,
-    ) {
-      Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Icon(
-          painter = painterResource(PiIcons.history),
-          contentDescription = "Open sessions",
-          tint = PiSecondary,
-          modifier = Modifier.size(18.dp),
-        )
-        Text("SESSIONS", style = PiType.Nano, color = PiSecondary, maxLines = 1, softWrap = false, modifier = Modifier.padding(top = 1.dp))
-      }
+    HeaderGlyph(
+      icon = PiIcons.folder,
+      label = "FILES",
+      description = "Open files",
+      onClick = onFiles,
+    )
+    HeaderGlyph(
+      icon = PiIcons.history,
+      label = "SESSIONS",
+      description = "Open sessions",
+      onClick = onHistory,
+    )
+  }
+}
+
+/** One header glyph with its 8 sp label; the hit area is the full accessible touch target. */
+@Composable
+private fun HeaderGlyph(
+  icon: Int,
+  label: String,
+  description: String,
+  onClick: () -> Unit,
+) {
+  Box(
+    modifier = Modifier
+      .widthIn(min = 56.dp)
+      .height(PiSpace.Touch)
+      .clickable(onClick = onClick),
+    contentAlignment = Alignment.Center,
+  ) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+      Icon(
+        painter = painterResource(icon),
+        contentDescription = description,
+        tint = PiSecondary,
+        modifier = Modifier.size(18.dp),
+      )
+      Text(
+        label,
+        style = PiType.Nano,
+        color = PiSecondary,
+        maxLines = 1,
+        softWrap = false,
+        modifier = Modifier.padding(top = 1.dp),
+      )
     }
   }
 }

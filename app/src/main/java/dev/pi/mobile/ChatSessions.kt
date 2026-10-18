@@ -17,6 +17,7 @@ import dev.pi.mobile.chat.SessionDrawerReducer
 import dev.pi.mobile.chat.SessionRow
 import dev.pi.mobile.chat.TreeNodeRow
 import dev.pi.mobile.chat.UsageState
+import dev.pi.mobile.chat.WorkspaceFilesReducer
 
 // ---------------------------------------------------------------------------
 // Session surface: the drawer, conversation switching, export and device intents
@@ -38,6 +39,7 @@ internal fun MainActivity.requestInbox() {
  * a tree/fork call path, where the tree section opens with it.
  */
 internal fun MainActivity.openHistory(fromTreeAction: Boolean) {
+  files = WorkspaceFilesReducer.close(files)
   drawer = SessionDrawerReducer.open(drawer, fromTreeAction)
   requestSessionSurface()
 }

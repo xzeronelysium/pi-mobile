@@ -4,6 +4,9 @@ Notable changes to Pi for Android are documented here. Entries are grouped by re
 
 ## Unreleased
 
+- Add a left-edge workspace file drawer: browse the bound workspace with breadcrumbs and a
+  per-folder filter, preview Markdown, code, text and images inline, attach any file to the prompt,
+  copy its absolute path, or hand it to another app through a read-only FileProvider grant.
 - Rework assistant markdown rendering: nested and task lists, grouped quotes, aligned tables,
   strikethrough, bare-URL links, hard breaks and escapes are now parsed; code blocks gained syntax
   colouring, a copy action, horizontal scrolling and long-block collapsing.

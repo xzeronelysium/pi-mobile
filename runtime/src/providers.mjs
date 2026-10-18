@@ -66,6 +66,14 @@ export function installProviders(models) {
   return catalog;
 }
 
+/** Keep the app's provider rows in sync without replacing registered provider instances. */
+export function updateProviderCatalog(models, catalog) {
+  for (const provider of models.getProviders()) {
+    const row = catalog.find(entry => entry.id === provider.id);
+    if (row) Object.assign(row, providerRow(models, provider));
+  }
+}
+
 /**
  * The ladder of pi thinking levels, lowest first. Used to project a model's `thinkingLevelMap`
  * into the flat list the Model/Effort sheet renders.

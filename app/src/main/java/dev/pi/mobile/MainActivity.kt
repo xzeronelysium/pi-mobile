@@ -166,7 +166,14 @@ class MainActivity : ComponentActivity() {
     )
   }
 
-  internal var settings by mutableStateOf(SettingsUiState())
+  private val preferences by lazy { dev.pi.mobile.chat.settingsStore(this) }
+  private var settingsState by mutableStateOf(SettingsUiState())
+  internal var settings: SettingsUiState
+    get() = settingsState
+    set(value) {
+      preferences.record(value)
+      settingsState = value
+    }
   internal var providers by mutableStateOf<List<DurableEvent.CatalogProvider>>(emptyList())
   internal var authRows by mutableStateOf<List<DurableEvent.AuthRow>>(emptyList())
   /** Every model the providers list, by kind: the picker's reachable catalog. */
@@ -257,6 +264,7 @@ class MainActivity : ComponentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    settingsState = preferences.restore()
     // Edge to edge, with both bars transparent and contrast enforcement off, so the Compose window
     // insets are the real ones the drawer, the header and the composer all inset against.
     enableEdgeToEdge()

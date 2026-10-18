@@ -22,13 +22,14 @@ import { createEditTool, createReadTool, createWriteTool } from '@earendil-works
 import { createSqliteDatabase } from './sqlite.mjs';
 import { createAndroidExecutionEnv } from './env.mjs';
 import { createCredentialStore } from './credentials.mjs';
+import { createModelsStore } from './models-store.mjs';
 import { createBridgeFetch, withBridgeFetch } from './fetch.mjs';
 import { createFetchTools } from './fetch-tool.mjs';
 import { createAndroidShellTools } from './shell-tool.mjs';
 import { createJsTools } from './js-tools.mjs';
 import { createRunScriptTools } from './run-script-tool.mjs';
 import { baseExtensions } from './skills.mjs';
-import { installProviders } from './providers.mjs';
+import { installProviders, updateProviderCatalog } from './providers.mjs';
 import { installOAuthFlows } from './oauth-flows.mjs';
 import { createMcpManager } from './mcp.mjs';
 import { message } from './host/util.mjs';
@@ -49,6 +50,7 @@ export function createPiNative(bridge, options = {}) {
   // WebView (no module loader for the bundler-opaque dynamic import).
   installOAuthFlows();
   const credentials = createCredentialStore(bridge.call);
+  const database = createSqliteDatabase(bridge.call);
   // Provider HTTP is performed in Kotlin (`fetch.mjs`): the WebView's own fetch leaves from
   // `https://pi.local`, which no provider grants via CORS, so it is refused before a model call.
   // The wrapped collection carries the transport explicitly on every operation pi-durable dispatches
@@ -57,6 +59,7 @@ export function createPiNative(bridge, options = {}) {
   const transport = options.fetch ?? createBridgeFetch(bridge);
   const models = withBridgeFetch(createModels({
     credentials,
+    modelsStore: createModelsStore(database),
     authContext: { env: async () => undefined, fileExists: async () => false },
   }), transport);
   const catalog = installProviders(models);
@@ -167,9 +170,15 @@ export function createPiNative(bridge, options = {}) {
       // One database facade for the whole host, shared with the durable storage: the app has ONE
       // SQLite connection and ONE serial database thread (`sql.begin` refuses a second transaction),
       // so a flow checkpoint and a durable commit have to be ordered through the same queue.
-      const database = createSqliteDatabase(bridge.call);
       const storage = await SqliteStorage.open(database);
       await credentials.load();
+      // Restore provider-owned catalogs before any ready/picker event, without network or auth
+      // refresh. Upstream reports per-provider storage failures without hiding other providers.
+      const restored = await models.refresh({ allowNetwork: false });
+      for (const [provider, error] of restored.errors) {
+        bridge.emit({ type: 'error', operation: 'models.restore', provider, message: message(error) });
+      }
+      updateProviderCatalog(models, catalog);
       // One environment per harness; the conversation's cwd resolves against its root.
       const env = createAndroidExecutionEnv({
         call: bridge.call,

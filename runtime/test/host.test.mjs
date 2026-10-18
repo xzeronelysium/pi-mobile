@@ -55,6 +55,59 @@ test('real Pi harness persists application probe across reopen without model gen
   await reopened.close(); native.db.close();
 });
 
+test('refreshed provider catalog survives a runtime restart offline before ready', async () => {
+  const { createPiNative } = await import('../src/host.mjs');
+  const native = fakeNative();
+  const originalFetch = globalThis.fetch;
+  const remote = {
+    id: 'account-only-model', name: 'Account model', reasoning: true,
+    input: ['text', 'image'], contextWindow: 123456, maxTokens: 8192,
+    cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+    thinkingLevelMap: { off: null, low: 'low', high: 'high', max: null },
+  };
+  let networkCalls = 0;
+  globalThis.fetch = async () => {
+    networkCalls++;
+    return Response.json({ baseUrl: 'https://catalog.test/v1', models: [remote] });
+  };
+  let host;
+  try {
+    host = createPiNative(native.bridge);
+    await host.init();
+    await host.setKey({ provider: 'radius', apiKey: 'catalog-secret' });
+    assert.deepEqual((await host.refresh({ provider: 'radius', force: true })).errors, []);
+    const refreshed = await host.models({ provider: 'radius' });
+    assert.deepEqual(refreshed.models.map(model => model.id), [remote.id]);
+    assert.equal((await host.providers()).find(provider => provider.id === 'radius').counts.chat, 1);
+    await host.close();
+    // A restart must restore even without credentials, with no network check or graceful save.
+    native.vault.clear();
+    globalThis.fetch = async () => { networkCalls++; throw new Error('OFFLINE'); };
+    host = createPiNative(native.bridge);
+    const ready = await host.init();
+    assert.deepEqual(await host.models({ provider: 'radius' }), refreshed);
+    assert.equal(ready.providers.find(provider => provider.id === 'radius').counts.chat, 1);
+    assert.equal(networkCalls, 1);
+    assert.equal(native.requests.some(request => request.op.startsWith('sql.') && JSON.stringify(request).includes('catalog-secret')), false);
+    await host.setKey({ provider: 'radius', apiKey: 'catalog-secret' });
+    const failed = await host.refresh({ provider: 'radius', force: true });
+    assert.match(failed.errors.find(error => error.id === 'radius').message, /OFFLINE/);
+    assert.deepEqual(await host.models({ provider: 'radius' }), refreshed);
+    // An intentionally empty remote list replaces the baseline and stays empty after restart.
+    globalThis.fetch = async () => Response.json({ baseUrl: 'https://catalog.test/v1', models: [] });
+    assert.deepEqual((await host.refresh({ provider: 'radius', force: true })).errors, []);
+    await host.close();
+    host = createPiNative(native.bridge);
+    await host.init();
+    assert.deepEqual((await host.models({ provider: 'radius' })).models, []);
+    assert.equal((await host.providers()).find(provider => provider.id === 'radius').counts.total, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await host?.close();
+    native.db.close();
+  }
+});
+
 test('send rejects missing credentials, uses in-memory OpenAI auth and exposes provider failures', async () => {
   const { createPiNative } = await import('../src/host.mjs');
   const native = fakeNative(); const host = createPiNative(native.bridge);

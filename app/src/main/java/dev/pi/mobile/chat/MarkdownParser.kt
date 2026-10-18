@@ -47,15 +47,17 @@ sealed class MdInline {
 }
 
 object MarkdownParser {
-  /** Sentinel for hard breaks inside a paragraph; source text never contains NUL. */
-  private const val HARD_BREAK = '\u0000'
+  private const val MAX_NESTING = 64
 
   fun parse(source: String): List<MdBlock> {
-    val normalized = source.removePrefix("\uFEFF").replace("\r\n", "\n").replace('\r', '\n')
+    val normalized = source.removePrefix("\uFEFF").replace("\r\n", "\n").replace('\r', '\n').replace('\u0000', '\uFFFD')
     return parseBlocks(normalized.split('\n'))
   }
 
-  private fun parseBlocks(lines: List<String>): List<MdBlock> {
+  private fun parseBlocks(lines: List<String>, depth: Int = 0): List<MdBlock> {
+    if (depth >= MAX_NESTING) {
+      return listOf(MdBlock.Paragraph(listOf(MdInline.Text(lines.joinToString("\n")))))
+    }
     val blocks = ArrayList<MdBlock>()
     var i = 0
     while (i < lines.size) {
@@ -100,7 +102,7 @@ object MarkdownParser {
 
       val heading = ATX_HEADING.matchEntire(line.trimEnd())
       if (heading != null) {
-        val text = heading.groupValues[2].replace(Regex("""[ \t]+#+[ \t]*$"""), "").trim()
+        val text = heading.groupValues[2].replace(Regex("""(?:^|[ \t]+)#+[ \t]*$"""), "").trim()
         blocks.add(MdBlock.Heading(heading.groupValues[1].length, parseInlines(text)))
         i++
         continue
@@ -119,7 +121,7 @@ object MarkdownParser {
           inner.add(quoted)
           i++
         }
-        blocks.add(MdBlock.Quote(parseBlocks(inner)))
+        blocks.add(MdBlock.Quote(parseBlocks(inner, depth + 1)))
         continue
       }
 
@@ -134,7 +136,7 @@ object MarkdownParser {
           hasUnescapedPipe(lines[i]) &&
           !isBlockStartLine(lines[i])
         ) {
-          rows.add(splitRow(lines[i]))
+          rows.add(splitRow(lines[i]).take(headers.size).let { it + List(headers.size - it.size) { "" } })
           i++
         }
         blocks.add(MdBlock.Table(headers, rows, alignments))
@@ -143,52 +145,36 @@ object MarkdownParser {
 
       val marker = listMarker(line)
       if (marker != null) {
-        val list = parseList(lines, i, marker)
+        val list = parseList(lines, i, marker, depth)
         blocks.add(list.first)
         i = list.second
         continue
       }
 
-      // Setext heading: a paragraph line underlined with = or -.
-      if (i + 1 < lines.size && SETEXT_UNDERLINE.matches(lines[i + 1].trim())) {
-        val level = if (lines[i + 1].trim().startsWith("=")) 1 else 2
-        blocks.add(MdBlock.Heading(level, parseInlines(line.trim())))
-        i += 2
-        continue
-      }
-
       val text = StringBuilder()
-      var previousHardBreak = false
-      var endedWithBackslash = false
       var setextLevel = 0
       var firstLine = true
       while (i < lines.size) {
         val raw = lines[i]
         if (raw.isBlank()) break
-        if (!firstLine && SETEXT_UNDERLINE.matches(raw.trim())) {
+        if (!firstLine && SETEXT_UNDERLINE.matches(raw)) {
           setextLevel = if (raw.trim().startsWith("=")) 1 else 2
           i++
           break
         }
-        if (!firstLine && (isBlockStartLine(raw) || isTableHeaderAt(lines, i))) break
+        if (!firstLine && (interruptsParagraph(raw) || isTableHeaderAt(lines, i))) break
 
-        val hardBreak = raw.endsWith("  ") || raw.trimEnd().endsWith("\\")
-        val trailingBackslash = hardBreak && raw.trimEnd().endsWith("\\")
-        var piece = raw.trim()
-        if (trailingBackslash) piece = piece.dropLast(1)
-        if (!firstLine) text.append(if (previousHardBreak) HARD_BREAK else ' ')
-        text.append(piece)
-        previousHardBreak = hardBreak
-        endedWithBackslash = trailingBackslash
+        // Preserve line endings and trailing spaces until inline parsing: code spans take
+        // precedence over hard breaks, and escaped backslashes must remain distinguishable.
+        if (!firstLine) text.append('\n')
+        text.append(raw.trimStart())
         firstLine = false
         i++
       }
-      // A trailing backslash only means "hard break" when a next line was consumed.
-      if (endedWithBackslash && text.isNotEmpty()) text.append('\\')
       if (setextLevel > 0) {
-        blocks.add(MdBlock.Heading(setextLevel, parseInlines(text.toString())))
+        blocks.add(MdBlock.Heading(setextLevel, parseInlines(text.toString().trimEnd())))
       } else if (text.isNotEmpty()) {
-        blocks.add(MdBlock.Paragraph(parseInlines(text.toString())))
+        blocks.add(MdBlock.Paragraph(parseInlines(text.toString().trimEnd())))
       }
     }
     return blocks
@@ -198,17 +184,19 @@ object MarkdownParser {
     lines: List<String>,
     startIndex: Int,
     first: ListMarker,
+    depth: Int,
   ): Pair<MdBlock.ListBlock, Int> {
     val items = ArrayList<MdListItem>()
     var i = startIndex
     while (i < lines.size) {
       val marker = listMarker(lines[i]) ?: break
-      if (marker.indent != first.indent || marker.ordered != first.ordered) break
+      if (marker.indent != first.indent || marker.ordered != first.ordered || marker.delimiter != first.delimiter) break
 
       val body = ArrayList<String>()
       body.add(marker.text)
       i++
       var afterBlank = false
+      var lazyParagraph: Boolean? = null
       while (i < lines.size) {
         val current = lines[i]
         if (current.isBlank()) {
@@ -222,12 +210,15 @@ object MarkdownParser {
         if (indent <= first.indent && sibling != null) break
         if (indent >= marker.contentIndent) {
           body.add(dropIndent(current, marker.contentIndent))
+          lazyParagraph = null
           afterBlank = false
           i++
           continue
         }
-        if (afterBlank || indent <= first.indent) break
-        // Lazy continuation of the item's paragraph.
+        if (afterBlank || interruptsParagraph(current)) break
+        if (lazyParagraph == null) lazyParagraph = parseBlocks(body, depth + 1).lastOrNull() is MdBlock.Paragraph
+        if (!lazyParagraph) break
+        // Lazy continuation is allowed only while the item ends in a paragraph.
         body.add(current.trim())
         afterBlank = false
         i++
@@ -241,7 +232,7 @@ object MarkdownParser {
         task = if (taskMatch.groupValues[1] == " ") MdTask.TODO else MdTask.DONE
         body[0] = firstBodyLine.substring(taskMatch.range.last + 1).trimStart()
       }
-      items.add(MdListItem(task, parseBlocks(body)))
+      items.add(MdListItem(task, parseBlocks(body, depth + 1)))
     }
     return MdBlock.ListBlock(first.ordered, first.start, items) to i
   }
@@ -252,32 +243,32 @@ object MarkdownParser {
     val indent: Int,
     val contentIndent: Int,
     val text: String,
+    val delimiter: Char,
   )
 
   private fun listMarker(line: String): ListMarker? {
     val indent = indentOf(line)
     if (indent > 3) return null
     val rest = line.drop(indent)
-    val bullet = BULLET_MARKER.matchEntire(rest)
-    if (bullet != null) {
-      val spaces = bullet.groupValues[2].length
-      val pad = if (spaces > 4) 1 else spaces
-      return ListMarker(false, 1, indent, indent + 1 + pad, bullet.groupValues[3])
+    val match = BULLET_MARKER.matchEntire(rest) ?: ORDERED_MARKER.matchEntire(rest) ?: return null
+    val ordered = match.groupValues[1].first().isDigit()
+    val markerWidth = if (ordered) match.groupValues[1].length + 1 else 1
+    val delimiter = rest[markerWidth - 1]
+    val tail = rest.drop(markerWidth)
+    var column = indent + markerWidth
+    var chars = 0
+    while (chars < tail.length && (tail[chars] == ' ' || tail[chars] == '\t')) {
+      column += if (tail[chars] == '\t') 4 - column % 4 else 1
+      chars++
     }
-    val ordered = ORDERED_MARKER.matchEntire(rest)
-    if (ordered != null) {
-      val digits = ordered.groupValues[1]
-      val spaces = ordered.groupValues[3].length
-      val pad = if (spaces > 4) 1 else spaces
-      return ListMarker(
-        ordered = true,
-        start = digits.toIntOrNull() ?: 1,
-        indent = indent,
-        contentIndent = indent + digits.length + 1 + pad,
-        text = ordered.groupValues[4],
-      )
-    }
-    return null
+    val spaces = column - indent - markerWidth
+    val empty = tail.drop(chars).isEmpty()
+    val pad = if (empty || spaces > 4) 1 else spaces
+    val content = if (empty) "" else " ".repeat(spaces - pad) + tail.drop(chars)
+    return ListMarker(
+      ordered, if (ordered) match.groupValues[1].toInt() else 1,
+      indent, indent + markerWidth + pad, content, delimiter,
+    )
   }
 
   private data class Fence(val indent: Int, val marker: Char, val length: Int, val info: String)
@@ -342,63 +333,68 @@ object MarkdownParser {
     }
   }
 
-  private fun hasUnescapedPipe(line: String): Boolean {
+  private fun hasUnescapedPipe(line: String): Boolean = tablePipes(line).isNotEmpty()
+
+  /** Only matched code spans shield pipes; an unfinished backtick remains literal. */
+  private fun tablePipes(line: String): List<Int> {
+    val pipes = ArrayList<Int>()
     var i = 0
-    var ticks = 0
     while (i < line.length) {
-      val c = line[i]
-      if (c == '\\' && i + 1 < line.length) {
+      if (line[i] == '\\' && i + 1 < line.length && isEscapable(line[i + 1])) {
         i += 2
         continue
       }
-      if (c == '`') {
-        val run = countRun(line, i, '`')
-        ticks = if (ticks == 0) run else if (ticks == run) 0 else ticks
-        i += run
+      if (line[i] == '`') {
+        val span = readCodeSpan(line, i)
+        if (span != null) {
+          i = span.end
+          continue
+        }
+        i += countRun(line, i, '`')
         continue
       }
-      if (c == '|' && ticks == 0) return true
+      if (line[i] == '|') pipes.add(i)
       i++
     }
-    return false
+    return pipes
   }
 
-  /** Split a table row on unescaped pipes, keeping pipes inside code spans intact. */
+  /** Keep inline source for the renderer, unescaping table-specific escaped pipes once. */
   private fun splitRow(line: String): List<String> {
+    val pipes = tablePipes(line)
     val cells = ArrayList<String>()
-    val cell = StringBuilder()
-    var i = 0
-    var ticks = 0
-    while (i < line.length) {
-      val c = line[i]
-      if (c == '\\' && i + 1 < line.length && line[i + 1] == '|') {
-        cell.append('|')
-        i += 2
-        continue
+    var start = 0
+    for (end in pipes + line.length) {
+      val raw = line.substring(start, end).trim()
+      val cell = StringBuilder()
+      var i = 0
+      while (i < raw.length) {
+        if (raw[i] == '\\' && i + 1 < raw.length && isEscapable(raw[i + 1])) {
+          if (raw[i + 1] != '|') cell.append('\\')
+          cell.append(raw[i + 1])
+          i += 2
+        } else {
+          cell.append(raw[i++])
+        }
       }
-      if (c == '`') {
-        val run = countRun(line, i, '`')
-        ticks = if (ticks == 0) run else if (ticks == run) 0 else ticks
-        cell.append(line, i, i + run)
-        i += run
-        continue
-      }
-      if (c == '|' && ticks == 0) {
-        cells.add(cell.toString().trim())
-        cell.clear()
-        i++
-        continue
-      }
-      cell.append(c)
-      i++
+      cells.add(cell.toString())
+      start = end + 1
     }
-    cells.add(cell.toString().trim())
-    if (cells.isNotEmpty() && cells.first().isEmpty() && line.trimStart().startsWith("|")) cells.removeAt(0)
-    if (cells.isNotEmpty() && cells.last().isEmpty() && line.trimEnd().endsWith("|")) cells.removeAt(cells.lastIndex)
+    if (pipes.firstOrNull() == line.indexOfFirst { !it.isWhitespace() }) cells.removeAt(0)
+    if (pipes.lastOrNull() == line.indexOfLast { !it.isWhitespace() } && cells.isNotEmpty()) {
+      cells.removeAt(cells.lastIndex)
+    }
     return cells
   }
 
+  private fun interruptsParagraph(line: String): Boolean {
+    val marker = listMarker(line)
+    if (marker != null) return marker.text.isNotBlank() && (!marker.ordered || marker.start == 1)
+    return isBlockStartLine(line)
+  }
+
   private fun isBlockStartLine(line: String): Boolean {
+    if (indentOf(line) > 3) return false
     val trimmed = line.trim()
     return openingFence(line) != null ||
       ATX_HEADING.matches(line.trimEnd()) ||
@@ -413,7 +409,7 @@ object MarkdownParser {
     while (i < line.length) {
       when (line[i]) {
         ' ' -> count++
-        '\t' -> count += 4
+        '\t' -> count += 4 - count % 4
         else -> return count
       }
       i++
@@ -427,7 +423,7 @@ object MarkdownParser {
     while (i < line.length && remaining > 0) {
       when (line[i]) {
         ' ' -> remaining--
-        '\t' -> remaining -= 4
+        '\t' -> remaining -= 4 - (count - remaining) % 4
         else -> return line.substring(i)
       }
       i++
@@ -435,7 +431,10 @@ object MarkdownParser {
     return if (remaining < 0) " ".repeat(-remaining) + line.substring(i) else line.substring(i)
   }
 
-  fun parseInlines(text: String): List<MdInline> {
+  fun parseInlines(text: String): List<MdInline> = parseInlines(text, 0)
+
+  private fun parseInlines(text: String, depth: Int): List<MdInline> {
+    if (depth >= MAX_NESTING) return listOf(MdInline.Text(text))
     val out = ArrayList<MdInline>()
     val buffer = StringBuilder()
     fun flush() {
@@ -448,10 +447,21 @@ object MarkdownParser {
     while (i < text.length) {
       val c = text[i]
       when {
-        c == HARD_BREAK -> {
+        c == '\n' -> {
+          if (buffer.endsWith("  ")) {
+            while (buffer.isNotEmpty() && buffer.last() == ' ') buffer.setLength(buffer.length - 1)
+            flush()
+            out.add(MdInline.Break())
+          } else {
+            while (buffer.isNotEmpty() && buffer.last() == ' ') buffer.setLength(buffer.length - 1)
+            buffer.append(' ')
+          }
+          i++
+        }
+        c == '\\' && text.getOrNull(i + 1) == '\n' -> {
           flush()
           out.add(MdInline.Break())
-          i++
+          i += 2
         }
         c == '\\' && i + 1 < text.length && isEscapable(text[i + 1]) -> {
           buffer.append(text[i + 1])
@@ -484,7 +494,7 @@ object MarkdownParser {
           val link = readLink(text, i, image = false)
           if (link != null) {
             flush()
-            out.add(MdInline.Link(parseInlines(link.label), link.url))
+            out.add(MdInline.Link(parseInlines(link.label, depth + 1), link.url))
             i = link.end
           } else {
             buffer.append(c)
@@ -509,11 +519,12 @@ object MarkdownParser {
             i++
           }
         }
-        c == '~' && text.getOrNull(i + 1) == '~' -> {
+        c == '~' && text.getOrNull(i + 1) == '~' &&
+          text.getOrNull(i + 2)?.let { !it.isWhitespace() && it != '~' } == true -> {
           val close = findStrikethroughClose(text, i + 2)
           if (close >= 0) {
             flush()
-            out.add(MdInline.Strikethrough(parseInlines(text.substring(i + 2, close))))
+            out.add(MdInline.Strikethrough(parseInlines(text.substring(i + 2, close), depth + 1)))
             i = close + 2
           } else {
             buffer.append(c)
@@ -521,7 +532,7 @@ object MarkdownParser {
           }
         }
         c == '*' || c == '_' -> {
-          val emphasis = readEmphasis(text, i)
+          val emphasis = readEmphasis(text, i, depth)
           if (emphasis != null) {
             flush()
             out.add(emphasis.node)
@@ -601,10 +612,11 @@ object MarkdownParser {
     if (text.getOrNull(i) == '<') {
       i++
       while (i < text.length && text[i] != '>' && text[i] != '\n') {
-        if (text[i] == '\\' && i + 1 < text.length) {
-          destination.append(text[i + 1])
+        if (text[i] == '\\' && i + 1 < text.length && isEscapable(text[i + 1])) {
+          destination.append(text[i]).append(text[i + 1])
           i += 2
         } else {
+          if (text[i] == '<' || text[i].isISOControl()) return null
           destination.append(text[i])
           i++
         }
@@ -615,8 +627,8 @@ object MarkdownParser {
       var depth = 0
       while (i < text.length) {
         val c = text[i]
-        if (c == '\\' && i + 1 < text.length) {
-          destination.append(text[i + 1])
+        if (c == '\\' && i + 1 < text.length && isEscapable(text[i + 1])) {
+          destination.append(c).append(text[i + 1])
           i += 2
           continue
         }
@@ -638,11 +650,14 @@ object MarkdownParser {
         destination.append(c)
         i++
       }
+      if (depth != 0) return null
     }
+    val destinationEnd = i
     i = skipSpaces(text, i)
 
     // Optional link title: "…", '…' or (…). It never belongs to the URL.
     if (i < text.length && (text[i] == '"' || text[i] == '\'' || text[i] == '(')) {
+      if (i == destinationEnd) return null
       val closer = if (text[i] == '(') ')' else text[i]
       var j = i + 1
       while (j < text.length && text[j] != closer) {
@@ -653,15 +668,43 @@ object MarkdownParser {
       i = skipSpaces(text, j + 1)
     }
     if (text.getOrNull(i) != ')') return null
-    return RawLink(text.substring(labelStart, labelEnd), destination.toString().trim(), i + 1)
+    return RawLink(text.substring(labelStart, labelEnd), decodeLinkDestination(destination.toString()), i + 1)
+  }
+
+  /** Link destinations decode escapes/entities without interpreting inline markup or HTML. */
+  private fun decodeLinkDestination(raw: String): String {
+    val out = StringBuilder()
+    var i = 0
+    while (i < raw.length) {
+      if (raw[i] == '\\' && i + 1 < raw.length && isEscapable(raw[i + 1])) {
+        out.append(raw[i + 1])
+        i += 2
+      } else {
+        val entity = if (raw[i] == '&') readEntity(raw, i) else null
+        if (entity != null) {
+          out.append(entity.text)
+          i = entity.end
+        } else {
+          out.append(raw[i++])
+        }
+      }
+    }
+    return out.toString()
   }
 
   private fun findClosingBracket(text: String, from: Int): Int {
     var depth = 0
     var i = from
     while (i < text.length) {
+      if (text[i] == '`') {
+        val span = readCodeSpan(text, i)
+        if (span != null) {
+          i = span.end
+          continue
+        }
+      }
       when (text[i]) {
-        '\\' -> i++
+        '\\' -> if (text.getOrNull(i + 1)?.let(::isEscapable) == true) i++
         '[' -> depth++
         ']' -> {
           if (depth == 0) return i
@@ -675,7 +718,7 @@ object MarkdownParser {
 
   private fun skipSpaces(text: String, from: Int): Int {
     var i = from
-    while (i < text.length && (text[i] == ' ' || text[i] == '\t')) i++
+    while (i < text.length && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n')) i++
     return i
   }
 
@@ -725,7 +768,7 @@ object MarkdownParser {
 
   private data class EmphasisResult(val node: MdInline, val end: Int)
 
-  private fun readEmphasis(text: String, start: Int): EmphasisResult? {
+  private fun readEmphasis(text: String, start: Int, depth: Int): EmphasisResult? {
     val marker = text[start]
     val run = countRun(text, start, marker)
     if (!canOpenDelimiter(text, start, run, marker)) return null
@@ -768,7 +811,7 @@ object MarkdownParser {
               } else {
                 0
               }
-              val children = parseInlines(base + text.substring(i, i + extra))
+              val children = parseInlines(base + text.substring(i, i + extra), depth + 1)
               val node = when (width) {
                 3 -> MdInline.Emphasis(listOf(MdInline.Strong(children)))
                 2 -> MdInline.Strong(children)
@@ -852,6 +895,20 @@ object MarkdownParser {
         i += 2
         continue
       }
+      if (text[i] == '`') {
+        val span = readCodeSpan(text, i)
+        if (span != null) {
+          i = span.end
+          continue
+        }
+      }
+      if (text[i] == '[' || (text[i] == '!' && text.getOrNull(i + 1) == '[')) {
+        val link = readLink(text, i, text[i] == '!')
+        if (link != null) {
+          i = link.end
+          continue
+        }
+      }
       if (text[i] == '~' && text[i + 1] == '~' && i > from && !text[i - 1].isWhitespace()) return i
       i++
     }
@@ -874,13 +931,13 @@ object MarkdownParser {
     val decoded = when {
       body.startsWith("#x", ignoreCase = true) -> codePoint(body.drop(2).toIntOrNull(16))
       body.startsWith("#") -> codePoint(body.drop(1).toIntOrNull())
-      else -> NAMED_ENTITIES[body.lowercase()]
+      else -> NAMED_ENTITIES[body]
     } ?: return null
     return Entity(decoded, match.range.last + 1)
   }
 
   private fun codePoint(value: Int?): String? {
-    if (value == null || value <= 0 || value > 0x10FFFF || value in 0xD800..0xDFFF) return null
+    if (value == null || value <= 0 || value > 0x10FFFF || value in 0xD800..0xDFFF) return "\uFFFD"
     return String(Character.toChars(value))
   }
 
@@ -914,8 +971,8 @@ object MarkdownParser {
   private val ATX_HEADING = Regex("""^ {0,3}(#{1,6})(?:[ \t]+(.*))?$""")
   private val SETEXT_UNDERLINE = Regex("""^ {0,3}(?:=+|-+)[ \t]*$""")
   private val THEMATIC_BREAK = Regex("""^(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$""")
-  private val BULLET_MARKER = Regex("""^([-*+])([ \t]+)(.*)$""")
-  private val ORDERED_MARKER = Regex("""^(\d{1,9})([.)])([ \t]+)(.*)$""")
+  private val BULLET_MARKER = Regex("""^([-*+])(?:[ \t]+.*)?$""")
+  private val ORDERED_MARKER = Regex("""^(\d{1,9})([.)])(?:[ \t]+.*)?$""")
   private val TASK_PREFIX = Regex("""^\[([ xX])\](?:[ \t]+|$)""")
   private val TABLE_SEPARATOR_CELL = Regex("""^:?-+:?$""")
   private val HTML_BREAK = Regex("""<br\s*/?>""", RegexOption.IGNORE_CASE)
@@ -927,7 +984,11 @@ object MarkdownParser {
     "gt" to ">",
     "quot" to "\"",
     "apos" to "'",
-    "nbsp" to " ",
+    "AMP" to "&",
+    "LT" to "<",
+    "GT" to ">",
+    "QUOT" to "\"",
+    "nbsp" to "\u00A0",
     "hellip" to "…",
     "mdash" to "—",
     "ndash" to "–",

@@ -31,8 +31,12 @@ executes HTML.
   horizontally when they do not fit.
 - Nested lists indent under the parent item and use a lighter bullet per level.
 - Quotes draw one continuous rule and mute their contents.
-- Links are accent-coloured and underlined. Only `http(s)` and plain `mailto:` links can open.
-- The whole message participates in text selection.
+- Links are accent-coloured and underlined, using Compose's native link annotations for touch,
+  keyboard and accessibility activation. Only `http(s)` and plain `mailto:` links can open.
+- Headings expose heading semantics and task markers expose their completion state.
+- The message content participates in text selection; code-block controls do not pollute copied text.
+- Expanded code blocks stay expanded while their source streams, including when the fence closes.
+- Extremely deep block or inline nesting falls back to literal text rather than risking stack overflow.
 
 ## Deliberate limits
 
@@ -47,4 +51,6 @@ executes HTML.
 
 `MarkdownParserTest` covers block and inline parsing, nesting, tables, escapes, streaming
 tolerance and URL safety. `CodeHighlightTest` covers the tokenizer's language families and diff
-mode. Renderer layout is exercised in the app; unit tests cover parsing and highlighting.
+mode. `MarkdownContentTest` covers native link annotations, safe-link filtering, and streaming
+code expansion state. The manual acceptance corpus in [markdown-qa.md](markdown-qa.md) covers
+mobile layout, selection, accessibility, and streaming checks.

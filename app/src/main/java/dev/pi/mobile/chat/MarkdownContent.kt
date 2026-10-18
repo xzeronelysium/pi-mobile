@@ -1,13 +1,8 @@
 package dev.pi.mobile.chat
 
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,9 +13,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
@@ -37,13 +34,23 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -51,6 +58,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
@@ -63,7 +71,6 @@ import dev.pi.mobile.theme.Foreground
 import dev.pi.mobile.theme.Hairline
 import dev.pi.mobile.theme.Mono
 import dev.pi.mobile.theme.Muted
-import dev.pi.mobile.theme.PiSpace
 import dev.pi.mobile.theme.PiType
 import dev.pi.mobile.theme.Sans
 import dev.pi.mobile.theme.Secondary
@@ -131,7 +138,9 @@ private fun MarkdownBlock(block: MdBlock, muted: Boolean, compact: Boolean, dept
         lineHeight = line,
         fontWeight = FontWeight.SemiBold,
         fontFamily = Sans,
-        modifier = Modifier.padding(top = if (compact) 2.dp else if (block.level <= 2) 6.dp else 2.dp),
+        modifier = Modifier
+          .semantics { heading() }
+          .padding(top = if (compact) 2.dp else if (block.level <= 2) 6.dp else 2.dp),
       )
     }
     is MdBlock.Paragraph -> MarkdownInlineText(
@@ -228,6 +237,11 @@ private fun TaskCheckbox(done: Boolean) {
   Box(
     Modifier
       .size(13.dp)
+      .semantics(mergeDescendants = true) {
+        contentDescription = "Task"
+        role = Role.Checkbox
+        toggleableState = if (done) ToggleableState.On else ToggleableState.Off
+      }
       .border(1.dp, if (done) Accent else MdSecondary, RoundedCornerShape(2.dp)),
     contentAlignment = Alignment.Center,
   ) {
@@ -235,6 +249,7 @@ private fun TaskCheckbox(done: Boolean) {
       Text(
         "✓",
         color = Accent,
+        modifier = Modifier.clearAndSetSemantics {},
         fontSize = 9.sp,
         lineHeight = 9.sp,
         fontFamily = Mono,
@@ -243,13 +258,35 @@ private fun TaskCheckbox(done: Boolean) {
   }
 }
 
+/** State belongs to the fence's composition slot, not each streamed version of its code. */
+internal data class MarkdownCodeUiState(
+  val code: String,
+  val language: String,
+  val expanded: Boolean = false,
+) {
+  fun updated(code: String, language: String): MarkdownCodeUiState =
+    MarkdownCodeUiState(
+      code,
+      language,
+      // Closing a streamed fence consumes the final empty source line. Its parsed code can
+      // therefore lose one terminal newline without representing a rewrite of the snippet.
+      expanded = expanded && language == this.language && (
+        code.startsWith(this.code) || (this.code.endsWith('\n') && code == this.code.dropLast(1))
+      ),
+    )
+}
+
 @Composable
 private fun MarkdownCodeBlock(block: MdBlock.CodeFence) {
   val clipboard = LocalClipboardManager.current
   var copied by remember(block.code) { mutableStateOf(false) }
-  var expanded by remember(block.code) { mutableStateOf(false) }
+  var codeState by remember { mutableStateOf(MarkdownCodeUiState(block.code, block.language)) }
+  if (codeState.code != block.code || codeState.language != block.language) {
+    // Keep the user's choice during streaming and fence closure; rewritten code starts collapsed.
+    codeState = codeState.updated(block.code, block.language)
+  }
   val lines = remember(block.code) { block.code.split('\n') }
-  val collapsed = !expanded && lines.size > COLLAPSED_CODE_LINES
+  val collapsed = !codeState.expanded && lines.size > COLLAPSED_CODE_LINES
   val visible = remember(block.code, collapsed) {
     if (collapsed) lines.take(COLLAPSED_CODE_LINES).joinToString("\n") else block.code
   }
@@ -274,36 +311,39 @@ private fun MarkdownCodeBlock(block: MdBlock.CodeFence) {
       .background(MdCode)
       .border(1.dp, MdDivider, RoundedCornerShape(6.dp)),
   ) {
-    Row(
-      Modifier
-        .fillMaxWidth()
-        .padding(start = 10.dp, end = 4.dp),
-      verticalAlignment = Alignment.CenterVertically,
-    ) {
-      Text(
-        block.language.ifBlank { "Code" },
-        style = PiType.Meta,
-        color = MdSecondary,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier.weight(1f),
-      )
-      Box(
+    DisableSelection {
+      Row(
         Modifier
-          .heightIn(min = PiSpace.TouchMin)
-          .clip(RoundedCornerShape(4.dp))
-          .clickable {
-            clipboard.setText(AnnotatedString(block.code))
-            copied = true
-          }
-          .padding(horizontal = 10.dp),
-        contentAlignment = Alignment.Center,
+          .fillMaxWidth()
+          .padding(start = 10.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
       ) {
         Text(
-          if (copied) "Copied" else "Copy",
+          block.language.ifBlank { "Code" },
           style = PiType.Meta,
-          color = if (copied) Accent else MdSecondary,
+          color = MdSecondary,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+          modifier = Modifier.weight(1f),
         )
+        Box(
+          Modifier
+            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+            .semantics { liveRegion = LiveRegionMode.Polite }
+            .clip(RoundedCornerShape(4.dp))
+            .clickable(role = Role.Button, onClickLabel = "Copy code") {
+              clipboard.setText(AnnotatedString(block.code))
+              copied = true
+            }
+            .padding(horizontal = 10.dp),
+          contentAlignment = Alignment.Center,
+        ) {
+          Text(
+            if (copied) "Copied" else "Copy",
+            style = PiType.Meta,
+            color = if (copied) Accent else MdSecondary,
+          )
+        }
       }
     }
     Box(
@@ -320,19 +360,21 @@ private fun MarkdownCodeBlock(block: MdBlock.CodeFence) {
     }
     if (lines.size > COLLAPSED_CODE_LINES) {
       HorizontalDivider(color = MdDivider)
-      Box(
-        Modifier
-          .fillMaxWidth()
-          .heightIn(min = PiSpace.TouchMin)
-          .clickable { expanded = !expanded }
-          .padding(horizontal = 10.dp),
-        contentAlignment = Alignment.CenterStart,
-      ) {
-        Text(
-          if (collapsed) "Show all ${lines.size} lines" else "Collapse",
-          style = PiType.Meta,
-          color = Accent,
-        )
+      DisableSelection {
+        Box(
+          Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .clickable(role = Role.Button) { codeState = codeState.copy(expanded = !codeState.expanded) }
+            .padding(horizontal = 10.dp),
+          contentAlignment = Alignment.CenterStart,
+        ) {
+          Text(
+            if (collapsed) "Show all ${lines.size} lines" else "Collapse",
+            style = PiType.Meta,
+            color = Accent,
+          )
+        }
       }
     }
   }
@@ -454,31 +496,16 @@ private fun MarkdownInlineText(
   textAlign: TextAlign? = null,
   modifier: Modifier = Modifier,
 ) {
-  val context = LocalContext.current
-  val annotated = remember(inlines) { inlineAnnotated(inlines) }
-  var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+  val uriHandler = LocalUriHandler.current
+  val annotated = remember(inlines, uriHandler) {
+    inlineAnnotated(inlines) { url ->
+      // Some safe schemes have no installed handler. Keep rendering/selection usable in that case.
+      runCatching { uriHandler.openUri(url) }
+    }
+  }
   Text(
     text = annotated,
-    modifier = modifier.pointerInput(annotated) {
-      awaitEachGesture {
-        // Observe rather than consume: text selection and scrolling keep working. If selection
-        // takes over the gesture, waitForUpOrCancellation returns null and no link is opened.
-        awaitFirstDown(requireUnconsumed = false)
-        val up = waitForUpOrCancellation() ?: return@awaitEachGesture
-        val layoutResult = layout ?: return@awaitEachGesture
-        val offset = layoutResult.getOffsetForPosition(up.position)
-        annotated.getStringAnnotations("URL", offset, offset).firstOrNull()?.let { annotation ->
-          if (MarkdownParser.isSafeLinkUrl(annotation.item)) {
-            runCatching {
-              context.startActivity(
-                Intent(Intent.ACTION_VIEW, Uri.parse(annotation.item))
-                  .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-              )
-            }
-          }
-        }
-      }
-    },
+    modifier = modifier,
     color = color,
     fontSize = fontSize,
     lineHeight = lineHeight,
@@ -486,11 +513,13 @@ private fun MarkdownInlineText(
     fontStyle = fontStyle,
     fontFamily = fontFamily,
     textAlign = textAlign,
-    onTextLayout = { layout = it },
   )
 }
 
-private fun inlineAnnotated(inlines: List<MdInline>): AnnotatedString = buildAnnotatedString {
+internal fun inlineAnnotated(
+  inlines: List<MdInline>,
+  openLink: (String) -> Unit,
+): AnnotatedString = buildAnnotatedString {
   fun emit(nodes: List<MdInline>) {
     nodes.forEach { node ->
       when (node) {
@@ -506,11 +535,20 @@ private fun inlineAnnotated(inlines: List<MdInline>): AnnotatedString = buildAnn
         is MdInline.Break -> append("\n")
         is MdInline.Link -> {
           if (MarkdownParser.isSafeLinkUrl(node.url)) {
-            pushStringAnnotation("URL", node.url)
-            withStyle(SpanStyle(textDecoration = TextDecoration.Underline, color = MdLink)) {
+            withLink(
+              LinkAnnotation.Url(
+                node.url,
+                TextLinkStyles(
+                  style = SpanStyle(textDecoration = TextDecoration.Underline, color = MdLink),
+                  focusedStyle = SpanStyle(background = MdCode),
+                ),
+              ) { link ->
+                val url = (link as LinkAnnotation.Url).url
+                if (MarkdownParser.isSafeLinkUrl(url)) openLink(url)
+              },
+            ) {
               if (node.label.isEmpty()) append(node.url) else emit(node.label)
             }
-            pop()
           } else if (node.label.isEmpty()) {
             append(node.url)
           } else {

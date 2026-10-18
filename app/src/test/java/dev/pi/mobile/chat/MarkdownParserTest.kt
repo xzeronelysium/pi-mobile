@@ -400,6 +400,154 @@ class MarkdownParserTest {
   }
 
   @Test
+  fun escapedBackslashesDoNotCreateHardBreaks() {
+    val paragraph = MarkdownParser.parse("one\\\\\ntwo").single() as MdBlock.Paragraph
+    assertEquals("one\\ two", paragraph.flatten())
+    assertTrue(paragraph.inlines.none { it is MdInline.Break })
+    assertEquals("one\\ two", MarkdownParser.parse("one\\ \ntwo").single().flatten())
+    assertEquals("one\\\ntwo", MarkdownParser.parse("one\\\\  \ntwo").single().flatten())
+  }
+
+  @Test
+  fun codeSpansPreserveTrailingSpacesAndNormalizeNewlines() {
+    val paragraph = MarkdownParser.parse("`one  \ntwo`").single() as MdBlock.Paragraph
+    assertEquals(listOf(MdInline.Code("one   two")), paragraph.inlines)
+    assertEquals("a\uFFFDb", MarkdownParser.parse("a\u0000b").single().flatten())
+  }
+
+  @Test
+  fun fourSpaceIndentedUnderlineDoesNotCreateAHeading() {
+    val blocks = MarkdownParser.parse("paragraph\n    ---")
+    assertEquals("paragraph ---", blocks.single().flatten())
+    assertTrue(blocks.single() is MdBlock.Paragraph)
+    assertEquals("one two", MarkdownParser.parse("one\ntwo\n  ===").single().flatten())
+  }
+
+  @Test
+  fun orderedListsOnlyInterruptParagraphsWhenStartingAtOne() {
+    assertEquals("version 2. still prose", MarkdownParser.parse("version\n2. still prose").single().flatten())
+    assertEquals(2, MarkdownParser.parse("paragraph\n1. item").size)
+    assertEquals("paragraph +", MarkdownParser.parse("paragraph\n+").single().flatten())
+  }
+
+  @Test
+  fun emptyListItemsAndMarkerChangesArePreserved() {
+    val empty = MarkdownParser.parse("-\n- item").single() as MdBlock.ListBlock
+    assertEquals(2, empty.items.size)
+    assertTrue(empty.items.first().blocks.isEmpty())
+    val lists = MarkdownParser.parse("- one\n+ two\n* three\n1. four\n2) five")
+    assertEquals(5, lists.size)
+    assertTrue(lists.all { it is MdBlock.ListBlock })
+  }
+
+  @Test
+  fun listPaddingAndTabStopsPreserveCodeIndentation() {
+    val spaces = MarkdownParser.parse("-     code\n      next").single() as MdBlock.ListBlock
+    assertEquals(MdBlock.CodeFence("", "code\nnext"), spaces.items.single().blocks.single())
+    val tabs = MarkdownParser.parse("-\titem\n\tcontinued").single() as MdBlock.ListBlock
+    assertEquals("item continued", tabs.items.single().blocks.single().flatten())
+    assertEquals(MdBlock.CodeFence("", "code"), MarkdownParser.parse(" \tcode").single())
+  }
+
+  @Test
+  fun listLazyContinuationRequiresAnOpenParagraph() {
+    val blocks = MarkdownParser.parse("- first\ncontinued\n\noutside")
+    val list = blocks.first() as MdBlock.ListBlock
+    assertEquals("first continued", list.items.single().blocks.single().flatten())
+    assertEquals("outside", blocks.last().flatten())
+    val heading = MarkdownParser.parse("- # heading\noutside")
+    assertEquals(2, heading.size)
+    assertEquals("outside", heading.last().flatten())
+    assertEquals(2, MarkdownParser.parse("- item\n# outside").size)
+  }
+
+  @Test
+  fun tableRowsNormalizeMissingAndExcessCells() {
+    val table = MarkdownParser.parse("a|b\n---|---\n|one|\n|two|three|extra|").single() as MdBlock.Table
+    assertEquals(listOf(listOf("one", ""), listOf("two", "three")), table.rows)
+  }
+
+  @Test
+  fun tablePipesRespectEscapeParityAndUnmatchedBackticks() {
+    val table = MarkdownParser.parse("a|b\n---|---\n`open|two\nslash\\\\|last").single() as MdBlock.Table
+    assertEquals(listOf(listOf("`open", "two"), listOf("slash\\\\", "last")), table.rows)
+    val escaped = MarkdownParser.parse("a|b\n---|---\n`a\\|b`|last").single() as MdBlock.Table
+    assertEquals(listOf("`a|b`", "last"), escaped.rows.single())
+  }
+
+  @Test
+  fun linkDestinationsDecodeEntitiesAndOnlyPunctuationEscapes() {
+    val link = MarkdownParser.parseInlines("[x](https://example.com/a\\q?a=1&amp;b=2)")
+      .filterIsInstance<MdInline.Link>().single()
+    assertEquals("https://example.com/a\\q?a=1&b=2", link.url)
+    val escaped = MarkdownParser.parseInlines("[x](https://example.com/a\\(b\\))")
+      .filterIsInstance<MdInline.Link>().single()
+    assertEquals("https://example.com/a(b)", escaped.url)
+    assertEquals("a&#35;", (MarkdownParser.parseInlines("[x](a&amp;#35;)").single() as MdInline.Link).url)
+  }
+
+  @Test
+  fun linkLabelsCanContainCodeWithClosingBrackets() {
+    val link = MarkdownParser.parseInlines("[use `]` here](https://example.com)").single() as MdInline.Link
+    assertEquals("use ] here", link.label.flatten())
+    assertTrue(link.label.any { it is MdInline.Code })
+  }
+
+  @Test
+  fun malformedLinkTitlesAndUnbalancedDestinationsStayLiteral() {
+    for (source in listOf("[x](<dest>\"title\")", "[x](a(b title)", "[x](<a<b>)")) {
+      assertTrue(source, MarkdownParser.parseInlines(source).none { it is MdInline.Link })
+    }
+  }
+
+  @Test
+  fun strikethroughDoesNotCloseInsideCodeOrLinkDestinations() {
+    val strike = MarkdownParser.parseInlines("~~use `~~` here~~").single() as MdInline.Strikethrough
+    assertEquals("use ~~ here", strike.children.flatten())
+    val linked = MarkdownParser.parseInlines("~~[link](https://example.com/~~) end~~").single() as MdInline.Strikethrough
+    assertEquals("link end", linked.children.flatten())
+    assertTrue(MarkdownParser.parseInlines("~~ spaced~~").all { it is MdInline.Text })
+  }
+
+  @Test
+  fun excessiveNestingDegradesToLiteralTextWithoutStackOverflow() {
+    val quotes = MarkdownParser.parse("> ".repeat(1500) + "deep")
+    assertTrue(quotes.isNotEmpty())
+    assertTrue(quotes.single().flatten().endsWith("deep"))
+    val links = "[".repeat(200) + "deep" + "](relative)".repeat(200)
+    assertTrue(MarkdownParser.parseInlines(links).flatten().contains("deep"))
+  }
+
+  @Test
+  fun codeSpansKeepBackslashesAtLineEnd() {
+    val paragraph = MarkdownParser.parse("`one\\\ntwo`").single() as MdBlock.Paragraph
+    assertEquals(listOf(MdInline.Code("one\\ two")), paragraph.inlines)
+  }
+
+  @Test
+  fun closingHashesCanMakeAnEmptyAtxHeading() {
+    val heading = MarkdownParser.parse("## ###").single() as MdBlock.Heading
+    assertEquals(2, heading.level)
+    assertTrue(heading.inlines.isEmpty())
+    assertEquals("literal#", MarkdownParser.parse("## literal#").single().flatten())
+  }
+
+  @Test
+  fun entitiesPreserveNonBreakingSpacesAndCaseAndReplaceInvalidScalars() {
+    assertEquals("a\u00A0b & &Amp;", MarkdownParser.parseInlines("a&nbsp;b &AMP; &Amp;").flatten())
+    assertEquals("\uFFFD \uFFFD \uFFFD 😀", MarkdownParser.parseInlines("&#0; &#xD800; &#x110000; &#x1F600;").flatten())
+    assertEquals(listOf(MdInline.Code("&nbsp;")), MarkdownParser.parseInlines("`&nbsp;`"))
+  }
+
+  @Test
+  fun linksCanWrapAcrossParagraphLines() {
+    val paragraph = MarkdownParser.parse("[a\nlabel](\nhttps://example.com\n\"title\")").single() as MdBlock.Paragraph
+    val link = paragraph.inlines.single() as MdInline.Link
+    assertEquals("a label", link.label.flatten())
+    assertEquals("https://example.com", link.url)
+  }
+
+  @Test
   fun blankAndBomInputsAreSafe() {
     assertTrue(MarkdownParser.parse("").isEmpty())
     assertTrue(MarkdownParser.parse("\uFEFF").isEmpty())

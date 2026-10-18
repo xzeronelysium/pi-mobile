@@ -15,6 +15,9 @@ val Background = Color(0xFF0A0A0A)
 /** A sheet or panel plane. Nearly the base colour: a change of surface, not a raised card. */
 val Surface = Color(0xFF0E0E0E)
 
+/** Code planes and inline-code chips: a hair above [Surface] so machine output reads as its own voice. */
+val CodeSurface = Color(0xFF161616)
+
 val Foreground = Color(0xFFEDEDED)
 
 /** Supporting text, metadata and unselected labels. 8.3:1 on [Background]. */

@@ -71,18 +71,17 @@ export ANDROID_KEY_PASSWORD
 
 Verify and checksum the resulting `app/build/outputs/apk/release/app-release.apk` before publishing it. A release build without these signing values is unsigned and cannot be installed as a normal app update.
 
-To publish manually, update `versionName`, increment `versionCode`, and add release notes to `CHANGELOG.md`. Run tests and build a signed APK first, then create and push a matching tag and publish the APK with the GitHub CLI:
+To publish manually, update `versionName`, increment `versionCode`, and add release notes to `CHANGELOG.md`. Run tests and build a signed APK first. Then use `gh release create` to create the matching version tag on `main` and publish the APK:
 
 ```sh
 ./gradlew :app:testDebugUnitTest
 (cd runtime && npm ci && npm test && npm run build)
 ./gradlew :app:assembleRelease
 sha256sum app/build/outputs/apk/release/app-release.apk > app-release.apk.sha256
-git tag -a v1.0.0 -m "Pi for Android 1.0.0"
-git push origin v1.0.0
 gh release create v1.0.0 \
   app/build/outputs/apk/release/app-release.apk \
-  app-release.apk.sha256 \
+  app/build/outputs/apk/release/app-release.apk.sha256 \
+  --target main \
   --title "Pi for Android 1.0.0" \
   --generate-notes
 ```

@@ -2,7 +2,7 @@
 
 Pi is an Android client for working with Pi AI sessions on a phone. The app is built with Kotlin and Jetpack Compose, and runs the Pi Durable runtime in an app-owned WebView. Android adapters provide the runtime's filesystem, shell, and storage access; the app does not bundle Node.js or a Linux userland.
 
-> **Project status:** Actively developed. A signed APK is published through GitHub Releases when a matching version tag is pushed. Builds are not yet published.
+> **Project status:** Actively developed. GitHub Releases are used for signed APK downloads; no APK release has been published yet.
 
 ## What it does
 
@@ -48,9 +48,46 @@ The app requests network access and currently declares `MANAGE_EXTERNAL_STORAGE`
 
 ## Release APKs
 
-Push a stable version tag such as `v1.0.0` after updating `versionName`, incrementing `versionCode`, and adding the release notes to `CHANGELOG.md`. GitHub Actions verifies the tag/version match, runs the test suites, builds a signed APK, and attaches the APK and SHA-256 checksum to a GitHub Release.
+Create one Android signing keystore and keep it backed up securely. It is not supplied by GitHub: it is your app's long-term signing identity, and every APK update must use the same key. Generate it locally with `keytool` (which prompts for the passwords):
 
-Repository administrators must configure these GitHub Actions secrets before creating a release tag: `ANDROID_KEYSTORE_BASE64` (the base64-encoded release keystore), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD`. Back up the signing keystore securely; future APK updates must use the same signing identity. Never commit the keystore or its passwords. A local `assembleRelease` without signing variables produces an unsigned APK, not an installable release.
+```sh
+mkdir -p "$HOME/.android"
+keytool -genkeypair -v \
+  -keystore "$HOME/.android/pi-mobile-release.jks" \
+  -alias pi-mobile -keyalg RSA -keysize 2048 -validity 10000
+```
+
+Do not commit the keystore or passwords. For a local signed build, export the signing values expected by Gradle (enter passwords interactively so they are not saved in shell history):
+
+```sh
+export ANDROID_KEYSTORE_FILE="$HOME/.android/pi-mobile-release.jks"
+export ANDROID_KEY_ALIAS=pi-mobile
+read -rsp 'Keystore password: ' ANDROID_KEYSTORE_PASSWORD; echo
+export ANDROID_KEYSTORE_PASSWORD
+read -rsp 'Key password: ' ANDROID_KEY_PASSWORD; echo
+export ANDROID_KEY_PASSWORD
+./gradlew :app:assembleRelease
+```
+
+Verify and checksum the resulting `app/build/outputs/apk/release/app-release.apk` before publishing it. A release build without these signing values is unsigned and cannot be installed as a normal app update.
+
+To publish manually, update `versionName`, increment `versionCode`, and add release notes to `CHANGELOG.md`. Run tests and build a signed APK first, then create and push a matching tag and publish the APK with the GitHub CLI:
+
+```sh
+./gradlew :app:testDebugUnitTest
+(cd runtime && npm ci && npm test && npm run build)
+./gradlew :app:assembleRelease
+sha256sum app/build/outputs/apk/release/app-release.apk > app-release.apk.sha256
+git tag -a v1.0.0 -m "Pi for Android 1.0.0"
+git push origin v1.0.0
+gh release create v1.0.0 \
+  app/build/outputs/apk/release/app-release.apk \
+  app-release.apk.sha256 \
+  --title "Pi for Android 1.0.0" \
+  --generate-notes
+```
+
+GitHub Actions are not required for builds or releases; tests and packaging are run locally.
 
 ## Versioning
 

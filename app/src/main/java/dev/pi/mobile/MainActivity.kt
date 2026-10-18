@@ -15,6 +15,7 @@ import androidx.lifecycle.lifecycleScope
 import dev.pi.mobile.backend.CapabilityProbe
 import dev.pi.mobile.backend.DurableRuntime
 import dev.pi.mobile.backend.WorkspaceBinding
+import dev.pi.mobile.backend.WorkspaceIdentity
 import dev.pi.mobile.backend.hasAllFilesAccess
 import dev.pi.mobile.backend.workspaceBinding
 import dev.pi.mobile.chat.AttachmentController
@@ -157,7 +158,8 @@ class MainActivity : ComponentActivity() {
     val label = docId.substringAfterLast(':').substringAfterLast('/').ifBlank { "folder" }
     binding.bindSafTree(uri.toString(), docId, label).fold(
       onSuccess = { resolved ->
-        workspace = resolved
+        // `startRuntime` resolves and installs the new workspace; assigning it here would make the
+        // reset delete staged chips against the new directory instead of the one they live in.
         noticeDialog = when (resolved.kind) {
           WorkspaceBinding.Kind.SAF_MIRROR ->
             "Folder bound as an app-private mirror (no stable path). Enable all files access to use primary storage paths directly."
@@ -378,7 +380,15 @@ class MainActivity : ComponentActivity() {
   override fun onResume() {
     super.onResume()
     allFilesAccess = hasAllFilesAccess()
-    workspace = binding.resolve()
+    val resolved = binding.resolve()
+    // All-files access or the bound folder itself can change while the app is in the background.
+    // The runtime was opened for the previous resolution, so a different cwd is a different
+    // workspace — and therefore a different session store. Restart rather than let the tools and
+    // the session list keep pointing at a workspace the drawer no longer names.
+    val changed = workspace?.let { WorkspaceIdentity.key(it.root.path) != WorkspaceIdentity.key(resolved.root.path) } == true
+    // A restart clears staged files against the workspace being left; installing the new
+    // resolution first would make that cleanup look in the wrong directory.
+    if (changed && runtime != null) startRuntime() else workspace = resolved
   }
 
   override fun onDestroy() {
@@ -390,12 +400,10 @@ class MainActivity : ComponentActivity() {
 
   /** One runtime per workspace; a restart bumps [runtimeEpoch] so stale events are ignored. */
   internal fun startRuntime() {
-    // A new workspace cannot read the old one's staged files, so the chips go with it.
-    dropStagedForReset()
-    // A drawer pointed at the previous workspace would list or preview the wrong tree.
-    files = WorkspaceFilesState()
-    filesLoadEpoch++
-    previewLoadEpoch++
+    // Nothing on screen belongs to the workspace being left: its transcript, queue, tree, usage,
+    // session list, staged files and file drawer are all cleared while the old workspace is still
+    // known, so cleanup uses the directory those files really live in. The new runtime re-reads its own.
+    resetForWorkspaceChange()
     val resolved = binding.resolve()
     workspace = resolved
     allFilesAccess = hasAllFilesAccess()
@@ -407,7 +415,17 @@ class MainActivity : ComponentActivity() {
     runtime?.close()
     ready = false
     busy = false
-    val next = DurableRuntime(this, resolved.root, resumeConversation = activeSession.recorded()) { event ->
+    // The pre-workspace build kept every conversation in one database. The first workspace this
+    // build opens adopts that file whole; every other workspace starts with its own empty store.
+    // Runs before the runtime can open the database, so the move never races a live connection.
+    val databaseName = WorkspaceIdentity.databaseName(resolved.root.path)
+    getDatabasePath(databaseName).parentFile?.let { directory ->
+      WorkspaceIdentity.migrateLegacyDatabase(directory, databaseName)
+    }
+    // The resume request is scoped to this workspace. The host also reads a workspace-scoped
+    // database, so this id can only name a conversation that this workspace actually owns.
+    val resume = activeSession.recorded(WorkspaceIdentity.key(resolved.root.path))
+    val next = DurableRuntime(this, resolved.root, resumeConversation = resume) { event ->
       runOnUiThread { if (epoch == runtimeEpoch) handle(event) }
     }
     runtime = next

@@ -8,16 +8,20 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import dev.pi.mobile.chat.ChatEntry
+import dev.pi.mobile.chat.CommandCatalog
 import dev.pi.mobile.chat.ConversationTree
 import dev.pi.mobile.chat.DurableEvent
 import dev.pi.mobile.chat.ExportFiles
 import dev.pi.mobile.chat.InboxState
+import dev.pi.mobile.chat.McpState
 import dev.pi.mobile.chat.SessionDialogsReducer
 import dev.pi.mobile.chat.SessionDrawerReducer
+import dev.pi.mobile.chat.SessionList
 import dev.pi.mobile.chat.SessionRow
 import dev.pi.mobile.chat.TreeNodeRow
 import dev.pi.mobile.chat.UsageState
 import dev.pi.mobile.chat.WorkspaceFilesReducer
+import dev.pi.mobile.chat.WorkspaceFilesState
 
 // ---------------------------------------------------------------------------
 // Session surface: the drawer, conversation switching, export and device intents
@@ -62,6 +66,23 @@ internal fun MainActivity.resetForSessionChange() {
   tree = ConversationTree()
   activeConversationId = null
   dropStagedForReset()
+}
+
+/**
+ * A different workspace owns a different runtime, session list, command catalog and MCP surface.
+ * Clear every one of them before the replacement runtime starts, so a workspace can never show the
+ * previous workspace's conversation rows while the new database is still opening.
+ */
+internal fun MainActivity.resetForWorkspaceChange() {
+  resetForSessionChange()
+  sessions = SessionList()
+  commands = CommandCatalog(loading = true)
+  mcp = McpState()
+  drawer = SessionDrawerReducer.close(drawer)
+  // A file drawer pointed at the previous workspace would list or preview the wrong tree.
+  files = WorkspaceFilesState()
+  filesLoadEpoch++
+  previewLoadEpoch++
 }
 
 internal fun MainActivity.switchSession(row: SessionRow) {

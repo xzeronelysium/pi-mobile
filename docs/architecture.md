@@ -26,6 +26,7 @@ DurableRuntime ── NativeRuntimeHost (WebView)
 - **Runtime bundle** — esbuild produces `app/src/main/assets/native-runtime/runtime.js`, which the app loads locally. The APK includes the generated bundle and the isolated JavaScript sandbox assets.
 - **WebView host** — `NativeRuntimeHost` loads the runtime; `DurableRuntime` exposes the UI-facing operations and typed events.
 - **Platform adapters** — Kotlin implements workspace file operations, bounded shell execution and streaming, HTTP transport, SQLite-backed storage, credential protection, and lifecycle cleanup.
+- **Workspace store** — sessions are workspace-bound: each resolved workspace owns a durable SQLite database named from its canonical-path digest, and the app remembers the last conversation separately for each one. Switching workspace opens that workspace's store instead of reusing an app-wide session list.
 
 No Node.js executable, Linux userland, or packaged shell is shipped. Commands use Android's `/system/bin/sh` (mksh). Command availability and permissions therefore vary by device and app/workspace configuration.
 

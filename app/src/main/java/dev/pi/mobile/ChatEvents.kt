@@ -2,6 +2,7 @@ package dev.pi.mobile
 
 import android.util.Log
 import dev.pi.mobile.backend.ConsoleRedaction
+import dev.pi.mobile.backend.WorkspaceIdentity
 import dev.pi.mobile.chat.ChatEntry
 import dev.pi.mobile.chat.ComposerDraft
 import dev.pi.mobile.chat.ComposerSnapshotReconciler
@@ -193,10 +194,10 @@ internal fun MainActivity.mergeMessage(event: DurableEvent.Message) {
   applyTranscript(next)
 }
 
-/** The host named the conversation it is reading: keep it as the one the next launch resumes. */
+/** The host named the conversation it is reading: keep it for this workspace's next launch. */
 internal fun MainActivity.recordActiveConversation(id: Long) {
   activeConversationId = id
-  activeSession.record(id)
+  workspace?.let { activeSession.record(WorkspaceIdentity.key(it.root.path), id) }
 }
 
 /** A whole-history rebuild already supersedes the composer's optimistic rows; forget their ids. */

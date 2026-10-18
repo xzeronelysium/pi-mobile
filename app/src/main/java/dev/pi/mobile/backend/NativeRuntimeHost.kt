@@ -26,7 +26,18 @@ private const val MCP_STORE_NAME = "mcp-servers.json"
 
 /** Packaged JS only. This WebView is a runtime, not the Compose UI. Own it on the main thread. */
 @SuppressLint("SetJavaScriptEnabled")
-class NativeRuntimeHost(private val context: Context, private val workspacePath: String? = null, private val resumeConversation: Long? = null, private val onEvent: (JSONObject) -> Unit) : Closeable {
+class NativeRuntimeHost(
+  private val context: Context,
+  private val workspacePath: String? = null,
+  private val resumeConversation: Long? = null,
+  /**
+   * The durable database this workspace owns. Derived from [workspacePath] so switching workspace
+   * opens a different store — its own root conversation, history and session list — rather than
+   * resuming a conversation from the workspace the reader just left.
+   */
+  private val databaseName: String = WorkspaceIdentity.databaseName(workspacePath),
+  private val onEvent: (JSONObject) -> Unit,
+) : Closeable {
   /**
    * The largest bridge message a provider request body may occupy, base64 and quoting included.
    * Derived from the transport's own request limit, so the refusal is a clean error reply rather
@@ -309,7 +320,7 @@ class NativeRuntimeHost(private val context: Context, private val workspacePath:
           try {
             val result = when {
               operation.startsWith("sql.") -> {
-                if (storage == null) storage = NativeStorage(context)
+                if (storage == null) storage = NativeStorage(context, databaseName)
                 storage!!.dispatch(operation, args)
               }
               operation.startsWith("credential.") -> dispatchCredential(operation, args)

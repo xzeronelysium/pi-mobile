@@ -9,7 +9,7 @@ import org.json.JSONObject
 import java.io.Closeable
 
 /** One owner, used only on the bridge's serial database thread. */
-class NativeStorage(context: Context, name: String = "pi-native.sqlite") : Closeable {
+class NativeStorage(context: Context, name: String = WorkspaceIdentity.LEGACY_DATABASE) : Closeable {
   private val database = SQLiteDatabase.openOrCreateDatabase(context.getDatabasePath(name).apply { parentFile?.mkdirs() }, null)
   private var transaction = false
   private val modernSchema: Boolean

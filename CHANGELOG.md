@@ -4,5 +4,12 @@ Notable changes to Pi for Android are documented here. Entries are grouped by re
 
 ## Unreleased
 
-- Prepare the repository for its first public release with an MIT license, concise project documentation, and a documented manual signed-APK release process.
-- Move Android versioning to `1.0.0` and document the SemVer/tagging policy.
+- Refresh the README with real device screenshots, current capabilities, build steps, and security notes.
+- Expand the architecture guide with the current native-host and runtime boundaries.
+
+## 1.0.0 — 2026-10-18
+
+- First public release of Pi Mobile for Android.
+- Kotlin and Jetpack Compose app hosting Pi Durable in an app-owned WebView.
+- Native Android workspace, shell, persistence, provider and integration surfaces.
+- Signed APK and SHA-256 checksum published on GitHub Releases.

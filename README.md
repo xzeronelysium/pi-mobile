@@ -2,7 +2,7 @@
 
 Pi Mobile is an actively developed Android client for Pi AI, built with Kotlin and Jetpack Compose. It runs Pi Durable in an app-owned WebView and delegates filesystem, shell, networking, and persistence work to Android-native adapters. The phone needs no separate Node.js installation or Linux userland.
 
-> **[Get the latest APK](https://github.com/xzeronelysium/pi-mobile/releases/latest)** · [Architecture](docs/architecture.md) · [Contributing](CONTRIBUTING.md) · [Support](SUPPORT.md) · MIT licensed
+> **[Get the latest APK](https://github.com/xzeronelysium/pi-mobile/releases/latest)** · [Architecture](docs/architecture.md) · [Markdown](docs/markdown.md) · [Contributing](CONTRIBUTING.md) · [Support](SUPPORT.md) · MIT licensed
 
 ## Features today
 

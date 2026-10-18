@@ -1,97 +1,104 @@
 # Pi for Android
 
-Pi is an Android client for working with Pi AI sessions on a phone. The app is built with Kotlin and Jetpack Compose, and runs the Pi Durable runtime in an app-owned WebView. Android adapters provide the runtime's filesystem, shell, and storage access; the app does not bundle Node.js or a Linux userland.
+Pi Mobile is an actively developed Android client for Pi AI, built with Kotlin and Jetpack Compose. It runs Pi Durable in an app-owned WebView and delegates filesystem, shell, networking, and persistence work to Android-native adapters. The phone needs no separate Node.js installation or Linux userland.
 
-> **Project status:** Actively developed. GitHub Releases are used for signed APK downloads; no APK release has been published yet.
+> **[Get the latest APK](https://github.com/xzeronelysium/pi-mobile/releases/latest)** · [Architecture](docs/architecture.md) · [Contributing](CONTRIBUTING.md) · [Support](SUPPORT.md) · MIT licensed
 
-## What it does
+## Features today
 
-- Chat with configured AI providers using Pi's session and tool workflows.
-- Work with files in an Android workspace using the native Android runtime bridge.
-- Keep runtime JavaScript bundled with the app; no separate Node installation is required.
+- **Chat and sessions** — start conversations, revisit session history, and work with session trees.
+- **File-aware workspace** — attach files and use the app's Android workspace tools.
+- **Provider connections** — API-key setup and supported OAuth flows, depending on provider and device capabilities.
+- **Android-native runtime** — Kotlin file and SQLite adapters, bounded shell execution and streaming through Android's `/system/bin/sh` (`mksh`), and provider networking.
+- **Agent tools and integrations** — URL fetching, script execution, browser JavaScript packages in an isolated Worker, HTTP MCP, app resources, and durable workflows.
 
-Provider availability and individual capabilities depend on the current app implementation and configuration. This project is not affiliated with or endorsed by the providers it can connect to.
+Capabilities vary by provider and environment. Consult the app's capability report and source; upstream Pi features are not automatically available on Android. This independent project is not affiliated with or endorsed by Pi, Nous Research, or connected providers.
 
-## Build
+## Architecture
+
+```text
+Jetpack Compose UI
+        │ typed events / requests
+        ▼
+DurableRuntime → NativeRuntimeHost (app-owned WebView)
+                         │
+                    Pi Durable
+                         │ AndroidNative bridge
+              ┌──────────┼──────────┐
+              ▼          ▼          ▼
+       Kotlin file   /system/bin/sh  SQLite
+          adapter      (mksh)       storage
+```
+
+Runtime source lives in `runtime/src`; esbuild generates the JavaScript asset at `app/src/main/assets/native-runtime/runtime.js`. No Node binary or separate shell is bundled. See [docs/architecture.md](docs/architecture.md) for component and security details.
+
+## Screenshots
+
+The overview uses real captures from the app running on a phone:
+
+<p align="center">
+  <img src="docs/images/overview.jpg" alt="Pi Mobile chat, sessions, and settings screens" width="900">
+</p>
+
+<details>
+  <summary>More screens: model setup and provider sign-in</summary>
+  <p align="center">
+    <img src="docs/images/model-setup.png" alt="Model setup screen" width="320">
+    <img src="docs/images/provider-connect.png" alt="Provider connection options" width="320">
+  </p>
+</details>
+
+The screenshots show an empty demo conversation and no provider credentials. Status-bar details were cropped from the images.
+
+## Download
+
+Get the latest signed APK from [GitHub Releases](https://github.com/xzeronelysium/pi-mobile/releases/latest). Each release includes a SHA-256 checksum; verify it before installing. Keep the release signing keystore backed up securely so future updates remain installable.
+
+> This is an early project under active development. Back up important workspace data and do not assume desktop Pi features are all available on Android.
+
+## Build from source
 
 ### Requirements
 
-- Android Studio with a compatible Android SDK (compile SDK 36)
+- Android SDK with API 36 platform/build tools
 - JDK 17
-- Node.js and npm for building and testing the bundled runtime
+- Node.js 22+ and npm for runtime development and tests
 
-Set the Android SDK location in your local `local.properties` file (this file is intentionally not committed).
+Set `ANDROID_HOME` or add the SDK location in a local `local.properties` file (not committed).
 
 ```sh
-# Build the app
+# Android unit tests and debug APK (from repository root)
+./gradlew :app:testDebugUnitTest
 ./gradlew :app:assembleDebug
 
-# Run Android unit tests
-./gradlew :app:testDebugUnitTest
-
-# Build and test the JavaScript runtime bundle
+# JavaScript runtime tests and bundle
 cd runtime
 npm ci
 npm test
 npm run build
 ```
 
-The runtime build updates the generated bundle under `app/src/main/assets/native-runtime/`. Commit that generated output whenever its source or dependencies change. See [the architecture overview](docs/architecture.md) for how the Android and JavaScript parts fit together. Device/instrumentation tests require a connected Android device or emulator:
+The runtime build regenerates the asset under `app/src/main/assets/native-runtime/`. Commit the generated asset whenever runtime source or dependencies change. The runtime suite tests functionality and checks that the shipped bundle matches a fresh build. To test on a connected emulator or Android phone:
 
 ```sh
 ./gradlew :app:connectedDebugAndroidTest
 ```
 
+### Signed release build
+
+Gradle reads these environment variables for release signing: `ANDROID_KEYSTORE_FILE`, `ANDROID_KEY_ALIAS`, `ANDROID_KEYSTORE_PASSWORD`, and `ANDROID_KEY_PASSWORD`. Keep the keystore and passwords out of Git; do not put secrets directly in shell history. Once they are set securely:
+
+```sh
+./gradlew :app:assembleRelease
+```
+
+The APK is created at `app/build/outputs/apk/release/app-release.apk`. Update `versionName` and increment `versionCode` for each release. Follow [the release guide](docs/releasing.md), then verify the assets on GitHub. See [CHANGELOG.md](CHANGELOG.md) for release history.
+
 ## Security and permissions
 
-The app requests network access and currently declares `MANAGE_EXTERNAL_STORAGE` for broad workspace file access. This is a sensitive Android permission and may be unsuitable for Google Play distribution without a policy-compliant alternative. Review the permission and the runtime's shell/file access before installing or using the app with sensitive data. Never commit provider credentials, signing keys, `local.properties`, or private user data.
+- **Broad storage permission:** the app declares `MANAGE_EXTERNAL_STORAGE` for workspace access. This is sensitive and subject to Android/Google Play policy. Review it before granting access; Play distribution may require a policy-compliant alternative.
+- **Shell is not a sandbox:** commands run through Android's `/system/bin/sh` using the app's UID. File tools apply workspace path rules, but those rules do not confine the shell process.
+- **JavaScript packages are untrusted:** `js_run` executes package code in a separate WebView Worker without the Android bridge and exposes only declared input/output paths. This limits access; it does not make arbitrary packages trustworthy.
+- **Credential handling:** provider credentials use Android Keystore-backed protection. Never commit credentials, signing keys, `local.properties`, or private user data.
 
-## Release APKs
-
-Create one Android signing keystore and keep it backed up securely. It is not supplied by GitHub: it is your app's long-term signing identity, and every APK update must use the same key. Generate it locally with `keytool` (which prompts for the passwords):
-
-```sh
-mkdir -p "$HOME/.android"
-keytool -genkeypair -v \
-  -keystore "$HOME/.android/pi-mobile-release.jks" \
-  -alias pi-mobile -keyalg RSA -keysize 2048 -validity 10000
-```
-
-Do not commit the keystore or passwords. For a local signed build, export the signing values expected by Gradle (enter passwords interactively so they are not saved in shell history):
-
-```sh
-export ANDROID_KEYSTORE_FILE="$HOME/.android/pi-mobile-release.jks"
-export ANDROID_KEY_ALIAS=pi-mobile
-read -rsp 'Keystore password: ' ANDROID_KEYSTORE_PASSWORD; echo
-export ANDROID_KEYSTORE_PASSWORD
-read -rsp 'Key password: ' ANDROID_KEY_PASSWORD; echo
-export ANDROID_KEY_PASSWORD
-./gradlew :app:assembleRelease
-```
-
-Verify and checksum the resulting `app/build/outputs/apk/release/app-release.apk` before publishing it. A release build without these signing values is unsigned and cannot be installed as a normal app update.
-
-To publish manually, update `versionName`, increment `versionCode`, and add release notes to `CHANGELOG.md`. Run tests and build a signed APK first. Then use `gh release create` to create the matching version tag on `main` and publish the APK:
-
-```sh
-./gradlew :app:testDebugUnitTest
-(cd runtime && npm ci && npm test && npm run build)
-./gradlew :app:assembleRelease
-sha256sum app/build/outputs/apk/release/app-release.apk > app-release.apk.sha256
-gh release create v1.0.0 \
-  app/build/outputs/apk/release/app-release.apk \
-  app/build/outputs/apk/release/app-release.apk.sha256 \
-  --target main \
-  --title "Pi for Android 1.0.0" \
-  --generate-notes
-```
-
-GitHub Actions are not required for builds or releases; tests and packaging are run locally.
-
-## Versioning
-
-The Android app uses [Semantic Versioning](https://semver.org/) for `versionName` and a monotonically increasing integer for `versionCode`. Every release should have a corresponding `CHANGELOG.md` entry and a Git tag in the form `vMAJOR.MINOR.PATCH` (for example, `v1.2.0`). Do not reuse a `versionCode` once it has shipped. Breaking changes, new features, and fixes increment the major, minor, and patch components respectively, following SemVer's prerelease rules where appropriate.
-
-## License
-
-This project is available under the [MIT License](LICENSE). Third-party notices and attribution are collected in [`NOTICE`](NOTICE).
+See [NOTICE](NOTICE) for third-party notices and licensing. The project is available under the [MIT License](LICENSE). For questions, see [SUPPORT.md](SUPPORT.md); for private vulnerability reports, see [SECURITY.md](SECURITY.md).

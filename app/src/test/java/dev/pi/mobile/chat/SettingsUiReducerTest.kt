@@ -104,6 +104,87 @@ class SettingsUiReducerTest {
     assertTrue(state.hiddenByProvider.isEmpty())
   }
 
+  @Test fun connectingAnotherProviderDoesNotChangeTheActiveChatModel() {
+    val selected = SettingsUiState(selectedProvider = "openai", selectedModel = "gpt", effort = "High")
+    val connecting = SettingsUiReducer.startSignIn(selected, "deepseek", "DeepSeek", "api_key", false)
+    assertEquals("deepseek", connecting.signIn!!.provider)
+    assertEquals("openai", connecting.selectedProvider)
+    assertEquals("gpt", connecting.selectedModel)
+    assertEquals("High", connecting.effort)
+  }
+
+  @Test fun operationsSearchDoesNotReplaceTheChatModelSearch() {
+    val state = SettingsUiReducer.setOperationQuery(SettingsUiReducer.setModelQuery(SettingsUiState(), "chat"), "image")
+    assertEquals("chat", state.modelQuery)
+    assertEquals("image", state.operationQuery)
+  }
+
+  @Test fun modelSearchMatchesProviderLabelsIdsAndNamesWithoutChangingSelection() {
+    val one = ChatModelOption("router", "vendor/one", "Alpha")
+    val two = ChatModelOption("other", "vendor/two", "Beta")
+    val groups = listOf(
+      PickerProviderGroup("router", "Open Router", listOf(one), emptySet()),
+      PickerProviderGroup("other", "Other", listOf(two), emptySet()),
+    )
+    for (query in listOf(" ALPHA ", "vendor/one", "Open Router", "ROUTER")) {
+      assertEquals(listOf(one), SettingsUiReducer.modelGroups(groups, query, null).single().visible)
+    }
+    assertTrue(SettingsUiReducer.modelGroups(groups, "missing", null).isEmpty())
+    val state = SettingsUiState(selectedProvider = "other", selectedModel = two.modelId)
+    assertEquals("other", SettingsUiReducer.setModelQuery(state, "Alpha").selectedProvider)
+    assertEquals(two.modelId, SettingsUiReducer.setModelQuery(state, "Alpha").selectedModel)
+    assertEquals(groups, SettingsUiReducer.modelGroups(groups, "  ", null))
+  }
+
+  @Test fun modelSearchKeepsHiddenMatchesRecoverableOnlyInTheirChecklist() {
+    val hidden = ChatModelOption("one", "shared", "Hidden")
+    val visible = ChatModelOption("two", "shared", "Visible")
+    val groups = listOf(
+      PickerProviderGroup("one", "One", listOf(hidden), setOf("shared")),
+      PickerProviderGroup("two", "Two", listOf(visible), emptySet()),
+    )
+    assertTrue(SettingsUiReducer.modelGroups(groups, "Hidden", null).isEmpty())
+    assertEquals(listOf(hidden), SettingsUiReducer.modelGroups(groups, "Hidden", "one").single().models)
+    assertEquals(listOf(visible), SettingsUiReducer.modelGroups(groups, "shared", null).single().visible)
+    // An empty filter preserves even an entirely hidden provider's Edit affordance.
+    assertEquals(2, SettingsUiReducer.modelGroups(groups, "", null).size)
+    assertEquals(setOf("shared"), groups.first().hiddenIds)
+  }
+
+  @Test fun everyExitFromConnectInvalidatesTheLoginAndClearsItsDraft() {
+    val running = SettingsUiReducer.setApiKeyDraft(started(), "secret")
+    val exits = listOf(
+      SettingsUiReducer.toggleChevron(running),
+      SettingsUiReducer.openSheet(running, PickerSheet.Index),
+      SettingsUiReducer.openSheet(running, PickerSheet.Model),
+    )
+    for (exit in exits) {
+      assertNull(exit.signIn)
+      assertEquals("", exit.apiKeyDraft)
+      assertTrue(exit.loginGeneration > running.loginGeneration)
+      assertTrue(SettingsUiReducer.shouldCancelLogin(running, exit))
+    }
+    assertEquals(running, SettingsUiReducer.openSheet(running, PickerSheet.Connect))
+  }
+
+  @Test fun selectingAModelDoesNotReopenItsOldVisibilityEditor() {
+    val option = ChatModelOption("one", "id", "One")
+    val picked = SettingsUiReducer.selectModel(SettingsUiState(sheet = PickerSheet.Model, editingProvider = "one"), option)
+    assertNull(SettingsUiReducer.openSheet(picked, PickerSheet.Model).editingProvider)
+  }
+
+  @Test fun anAnsweredPromptReturnsToWaitingAndDoneAllowsAnotherProvider() {
+    val running = started()
+    val asked = SettingsUiReducer.applyPrompt(running, running.loginGeneration, prompt("p"))
+    assertTrue(SettingsUiReducer.promptAnswered(asked, "p").signIn!!.busy)
+    val settled = SettingsUiReducer.authSettled(running, running.loginGeneration, DurableEvent.AuthSettled("openai", "oauth", "saved"))
+    val done = SettingsUiReducer.cancelSignIn(settled)
+    val next = SettingsUiReducer.startSignIn(done, "deepseek", "DeepSeek", "api_key", false)
+    assertEquals("deepseek", next.signIn!!.provider)
+    assertEquals("api_key", next.signIn!!.authType)
+    assertTrue(next.loginGeneration > settled.loginGeneration)
+  }
+
   // ------------------------------------------------------------------ connect provider list
 
   @Test fun connectSplitsSubscriptionSignInFromApiKeysAndSearchIsHonest() {

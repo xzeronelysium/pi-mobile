@@ -24,7 +24,10 @@ internal fun MainActivity.SettingsSheetHost() {
   settings.sheet?.let { sheet ->
     val backToIndex: (() -> Unit)? =
       if (sheet == PickerSheet.Index) null
-      else ({ settings = SettingsUiReducer.openSheet(settings, PickerSheet.Index) })
+      else ({
+        dismissSheet()
+        settings = SettingsUiReducer.openSheet(settings, PickerSheet.Index)
+      })
     // A new key per sheet gives the modal a fresh sheet state. Without it, returning from a detail
     // to the index reuses the hidden state the back gesture left behind and the index never shows.
     key(sheet) {
@@ -68,6 +71,8 @@ internal fun MainActivity.SettingsSheetHost() {
           onDismiss = ::dismissSheet,
         )
         PickerSheet.Model -> ModelSheet(
+          query = settings.modelQuery,
+          onQuery = { settings = SettingsUiReducer.setModelQuery(settings, it) },
           editingProvider = settings.editingProvider,
           groups = modelGroups(),
           selected = selectedModel(),
@@ -89,13 +94,18 @@ internal fun MainActivity.SettingsSheetHost() {
           state = settings,
           authRows = authRows,
           providerChoices = providers,
-          selectedProviderName = selectedModel()?.providerName ?: selectedModel()?.provider ?: settings.selectedProvider,
-          selectedProviderNote = capabilityNote(selectedModel()?.provider?.let { id -> providers.firstOrNull { it.id == id } }),
-          apiKeyAccepted = providers.firstOrNull { it.id == settings.selectedProvider }?.apiKey == true,
           onQuery = { settings = SettingsUiReducer.setConnectQuery(settings, it) },
           onSignIn = ::startSignIn,
-          onAnswerPrompt = { value -> settings.signIn?.prompt?.let { runtime?.answerPrompt(it.requestId, value) } },
-          onDismissPrompt = { requestId -> runtime?.dismissPrompt(requestId) },
+          onAnswerPrompt = { value ->
+            settings.signIn?.prompt?.let { prompt ->
+              settings = SettingsUiReducer.promptAnswered(settings, prompt.requestId)
+              runtime?.answerPrompt(prompt.requestId, value)
+            }
+          },
+          onDismissPrompt = { requestId ->
+            settings = SettingsUiReducer.promptAnswered(settings, requestId)
+            runtime?.dismissPrompt(requestId)
+          },
           onCancelSignIn = {
             runtime?.cancelLogin()
             settings = SettingsUiReducer.cancelSignIn(settings)
@@ -103,11 +113,6 @@ internal fun MainActivity.SettingsSheetHost() {
           onLogout = { provider ->
             runtime?.logout(provider)
             requestCatalogs()
-          },
-          onApiKeyDraft = { settings = SettingsUiReducer.setApiKeyDraft(settings, it) },
-          onSaveKey = {
-            runtime?.setKey(settings.selectedProvider, settings.apiKeyDraft)
-            settings = SettingsUiReducer.setApiKeyDraft(settings, "")
           },
           onOpenUrl = ::openInBrowser,
           onRefresh = ::refreshModels,
@@ -117,7 +122,7 @@ internal fun MainActivity.SettingsSheetHost() {
           modelId = operationModel(operationKind) ?: "",
           models = (available[operationKind].orEmpty() + catalog[operationKind].orEmpty())
             .distinctBy { it.provider to it.modelId },
-          query = settings.modelQuery,
+          query = settings.operationQuery,
           imagePrompt = imagePrompt,
           classifyState = classifyState,
           classifyQuestion = classifyQuestion,
@@ -125,9 +130,9 @@ internal fun MainActivity.SettingsSheetHost() {
           providerNote = capabilityNote(providers.firstOrNull { it.id == settings.selectedProvider }),
           onKind = { kind ->
             operationKind = kind
-            settings = SettingsUiReducer.setModelQuery(settings, "")
+            settings = SettingsUiReducer.setOperationQuery(settings, "")
           },
-          onQuery = { settings = SettingsUiReducer.setModelQuery(settings, it) },
+          onQuery = { settings = SettingsUiReducer.setOperationQuery(settings, it) },
           onModel = { option -> operationModels = operationModels + (operationKind to option.modelId) },
           onImagePrompt = { imagePrompt = it },
           onClassifyState = { classifyState = it },

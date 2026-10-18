@@ -5,7 +5,7 @@
 // catalog, and drive the image/classifier/deferred operations. The module owns the one in-flight
 // login it guards; the conversation state stays with the session surface.
 
-import { capabilityRows, modelRows } from '../providers.mjs';
+import { capabilityRows, modelRows, updateProviderCatalog } from '../providers.mjs';
 import { describeCredential, rememberKey } from '../credentials.mjs';
 import { createInteraction } from '../interaction.mjs';
 import {
@@ -188,6 +188,7 @@ export function createProviderSurface({ bridge, models, credentials, catalog, re
       const controller = new AbortController();
       const providers = typeof query.provider === 'string' && query.provider ? [query.provider] : undefined;
       const result = await models.refresh({ allowNetwork: query.allowNetwork !== false, force: query.force === true, ...(providers ? { providers } : {}), signal: controller.signal });
+      updateProviderCatalog(models, catalog);
       const value = { aborted: result.aborted === true, errors: [...result.errors].map(([id, error]) => ({ id, message: message(error) })) };
       bridge.emit({ type: 'refresh', value });
       return value;

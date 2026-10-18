@@ -8,6 +8,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -31,6 +37,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -205,6 +212,8 @@ internal fun WorkspaceSheet(
 
 @Composable
 internal fun ModelSheet(
+  query: String,
+  onQuery: (String) -> Unit,
   editingProvider: String?,
   groups: List<PickerProviderGroup>,
   selected: ChatModelOption?,
@@ -215,74 +224,81 @@ internal fun ModelSheet(
   onSelect: (ChatModelOption) -> Unit,
   onConnect: () -> Unit,
 ) {
-  SheetBody {
+  val listState = rememberLazyListState()
+  val matching = remember(groups, query, editingProvider) {
+    SettingsUiReducer.modelGroups(groups, query, editingProvider)
+  }
+  // Reset for a user filter change, not for catalog refreshes or visibility toggles.
+  LaunchedEffect(query, editingProvider) { listState.scrollToItem(0) }
+  Column(Modifier.fillMaxSize().imePadding().padding(horizontal = 20.dp)) {
     SheetTitle(
       "Model",
       trailing = {
-        // The plus is the only route to Connect from here, and it opens Connect *instead of* this
-        // sheet — the two are never stacked.
-        Icon(
-          painter = painterResource(PiIcons.plus),
+        PiIconButton(
+          onClick = onConnect,
           contentDescription = "Connect a provider",
+          glyph = painterResource(PiIcons.plus),
           tint = PiForeground,
-          modifier = Modifier.clickable(onClick = onConnect).padding(8.dp).size(16.dp),
+          target = PiSpace.TouchMin,
+          glyphSize = 16.dp,
         )
       },
     )
-    if (groups.isEmpty()) {
-      Text(
-        "Models appear automatically once a provider is signed in or a key is added.",
-        style = PiType.Meta,
-        color = PiSecondary,
-        modifier = Modifier.padding(bottom = PiSpace.x2),
-      )
-      ActionRow("connect") { onConnect() }
-    }
-    for (group in groups) {
-      val editing = editingProvider == group.provider
-      Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(group.providerName, style = PiType.Ui, color = PiSecondary, modifier = Modifier.weight(1f))
-        Box(
-          Modifier
-            .heightIn(min = PiSpace.TouchMin)
-            .semantics { contentDescription = "Choose which ${group.providerName} models stay in this list" }
-            .clickable { onEdit(if (editing) null else group.provider) }
-            .padding(horizontal = PiSpace.x2),
-          contentAlignment = Alignment.Center,
-        ) {
+    FlatField(query, onQuery, "Search models")
+    LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
+      if (groups.isEmpty()) {
+        item(key = "empty") {
           Text(
-            if (editing) "Done" else "Edit",
-            color = if (editing) PiForeground else PiSecondary,
-            style = PiType.UiSmall,
+            "Models appear automatically once a provider is signed in or a key is added.",
+            style = PiType.Meta,
+            color = PiSecondary,
+            modifier = Modifier.padding(vertical = PiSpace.x2),
           )
+          ActionRow("Connect a provider", onClick = onConnect)
+        }
+      } else if (matching.isEmpty()) {
+        item(key = "no-results") {
+          Text("No model matches that search.", style = PiType.Meta, color = PiSecondary)
         }
       }
-      Box(Modifier.fillMaxWidth().height(1.dp).background(PiHairline))
-      Spacer(Modifier.height(4.dp))
-      when {
-        // Every provider keeps its section even with every model hidden, so the checklist can
-        // always show them again — and a section never needs a placeholder for a provider that is
-        // not signed in, because `groups` leaves those out entirely.
-        editing -> {
-          Text("Checked models stay in this list", style = PiType.Meta, color = PiSecondary, modifier = Modifier.padding(bottom = PiSpace.x1))
-          Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            ActionRow("hide all") { onHideAll(group.provider) }
-            ActionRow("show all") { onShowAll(group.provider) }
+      for (group in matching) {
+        val editing = editingProvider == group.provider
+        item(key = "provider:${group.provider}") {
+          Row(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(group.providerName, style = PiType.Ui, color = PiSecondary, modifier = Modifier.weight(1f))
+            Box(
+              Modifier.heightIn(min = PiSpace.TouchMin)
+                .semantics { contentDescription = "Choose which ${group.providerName} models stay in this list" }
+                .clickable { onEdit(if (editing) null else group.provider) }
+                .padding(horizontal = PiSpace.x2),
+              contentAlignment = Alignment.Center,
+            ) {
+              Text(if (editing) "Done" else "Edit", color = PiSecondary, style = PiType.UiSmall)
+            }
           }
-          for (option in group.models) {
+          PiRule()
+          if (editing) {
+            Text("Checked models stay in this list", style = PiType.Meta, color = PiSecondary)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+              ActionRow("hide all", modifier = Modifier.weight(1f)) { onHideAll(group.provider) }
+              ActionRow("show all", modifier = Modifier.weight(1f)) { onShowAll(group.provider) }
+            }
+          } else if (group.visible.isEmpty()) {
+            Text("All models hidden", style = PiType.Meta, color = PiSecondary)
+          }
+        }
+        val rows = if (editing) group.models else group.visible
+        items(rows.size, key = { index -> "model:${group.provider}:${rows[index].modelId}" }) { index ->
+          val option = rows[index]
+          if (editing) {
             val shown = option.modelId !in group.hiddenIds
             ModelVisibilityRow(option, shown) { onToggleHidden(option, shown) }
-          }
-        }
-        group.visible.isEmpty() -> {
-          Text("All models hidden", style = PiType.Meta, color = PiSecondary, modifier = Modifier.padding(bottom = PiSpace.x2))
-        }
-        else -> {
-          for (option in group.visible) {
+          } else {
             ModelChoice(option, selected?.provider == option.provider && selected.modelId == option.modelId) { onSelect(option) }
           }
         }
       }
+      item(key = "bottom-space") { Spacer(Modifier.height(20.dp)) }
     }
   }
 }
@@ -293,7 +309,8 @@ private fun ModelChoice(option: ChatModelOption, selected: Boolean, onClick: () 
     Modifier
       .fillMaxWidth()
       .heightIn(min = PiSpace.Touch)
-      .clickable(onClick = onClick)
+      .semantics { this.selected = selected }
+      .clickable(role = Role.RadioButton, onClick = onClick)
       .padding(end = PiSpace.x1),
     verticalAlignment = Alignment.CenterVertically,
   ) {
@@ -383,35 +400,35 @@ internal fun ConnectSheet(
   state: SettingsUiState,
   authRows: List<DurableEvent.AuthRow>,
   providerChoices: List<DurableEvent.CatalogProvider>,
-  selectedProviderName: String,
-  selectedProviderNote: String,
-  apiKeyAccepted: Boolean,
   onQuery: (String) -> Unit,
   onSignIn: (String, String) -> Unit,
   onAnswerPrompt: (String) -> Unit,
   onDismissPrompt: (String) -> Unit,
   onCancelSignIn: () -> Unit,
   onLogout: (String) -> Unit,
-  onApiKeyDraft: (String) -> Unit,
-  onSaveKey: () -> Unit,
   onOpenUrl: (String) -> Unit,
   onRefresh: () -> Unit,
 ) {
-  SheetBody {
+  val groups = remember(providerChoices, authRows, state.connectQuery) {
+    SettingsUiReducer.connectGroups(providerChoices, authRows, state.connectQuery)
+  }
+  // A prompt can arrive after a provider was chosen far down the list. Bring it into view.
+  SheetBody(scrollResetKey = state.loginGeneration to state.signIn?.prompt?.requestId) {
     SheetTitle("Connect")
     state.signIn?.let { session ->
-      SignInSteps(
-        session = session,
-        onAnswer = onAnswerPrompt,
-        onDismissPrompt = onDismissPrompt,
-        onCancel = onCancelSignIn,
-        onOpenUrl = onOpenUrl,
-      )
+      key(state.loginGeneration) {
+        SignInSteps(
+          session = session,
+          onAnswer = onAnswerPrompt,
+          onDismissPrompt = onDismissPrompt,
+          onCancel = onCancelSignIn,
+          onOpenUrl = onOpenUrl,
+        )
+      }
       HorizontalDivider(color = PiHairline, modifier = Modifier.padding(vertical = 8.dp))
     }
     SectionLabel("Providers", top = 4)
     FlatField(state.connectQuery, onQuery, "Search providers")
-    val groups = SettingsUiReducer.connectGroups(providerChoices, authRows, state.connectQuery)
     if (providerChoices.isEmpty()) {
       Text("The provider catalog is still loading.", color = PiSecondary, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
     } else if (groups.isEmpty()) {
@@ -420,8 +437,10 @@ internal fun ConnectSheet(
     for (group in groups) {
       SectionLabel(group.title, top = 12)
       for (row in group.rows) {
-        PopupChoice(row.label + if (row.configured) " · connected" else "", row.configured) {
-          if (state.signIn == null) onSignIn(row.provider, row.authType)
+        key(row.provider, row.authType) {
+          PopupChoice(row.label + if (row.configured) " · connected" else "", row.configured, enabled = state.signIn == null) {
+            onSignIn(row.provider, row.authType)
+          }
         }
       }
     }
@@ -438,24 +457,9 @@ internal fun ConnectSheet(
               color = PiSecondary,
             )
           }
-          ActionRow("log out", PiError) { if (state.signIn == null) onLogout(row.provider) }
+          ActionRow("log out", PiError, modifier = Modifier.width(80.dp)) { if (state.signIn == null) onLogout(row.provider) }
         }
       }
-    }
-    if (apiKeyAccepted) {
-      SectionLabel("Paste a key", top = 16)
-      Text(selectedProviderName, color = PiSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-      FlatField(state.apiKeyDraft, onApiKeyDraft, "API key (Keystore-sealed on save)")
-      ActionRow("save key") { if (state.apiKeyDraft.isNotBlank()) onSaveKey() }
-    }
-    if (selectedProviderNote.isNotBlank()) {
-      Text(
-        selectedProviderNote,
-        color = PiSecondary,
-        fontSize = 10.sp,
-        fontFamily = FontFamily.Monospace,
-        modifier = Modifier.padding(top = 14.dp),
-      )
     }
     ActionRow("reload models") { onRefresh() }
   }
@@ -476,7 +480,11 @@ private fun SignInSteps(
 ) {
   var typed by remember(session.prompt?.requestId) { mutableStateOf("") }
   Text(
-    if (session.subscription) "${session.name} · subscription sign-in" else "${session.name} · API key sign-in",
+    when {
+      session.authType == SettingsUiReducer.AUTH_TYPE_API_KEY -> "${session.name} · API key sign-in"
+      session.subscription -> "${session.name} · subscription sign-in"
+      else -> "${session.name} · sign-in"
+    },
     color = PiSecondary,
     fontSize = 11.sp,
     fontFamily = FontFamily.Monospace,
@@ -516,7 +524,7 @@ private fun SignInSteps(
         }
       }
       else -> {
-        FlatField(typed, { typed = it }, prompt.placeholder ?: if (prompt.type == "secret") "secret" else "value")
+        FlatField(typed, { typed = it }, prompt.placeholder ?: if (prompt.type == "secret") "secret" else "value", secret = prompt.type == "secret")
         ActionRow("submit") { onAnswer(typed) }
       }
     }
@@ -527,7 +535,8 @@ private fun SignInSteps(
   session.error?.let { Text(it, color = PiError, fontSize = 12.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 8.dp)) }
   session.settled?.let { Text("signed in · $it", color = PiAccent, fontSize = 12.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.padding(top = 8.dp)) }
   // Cancellable whenever the flow has not finished — including while a prompt is open.
-  if (session.busy || session.prompt != null) ActionRow("cancel sign-in", PiError, onCancel)
+  if (session.busy || session.prompt != null) ActionRow("cancel sign-in", PiError, onClick = onCancel)
+  else ActionRow("Done", onClick = onCancel)
 }
 
 // ---------------------------------------------------------------------------

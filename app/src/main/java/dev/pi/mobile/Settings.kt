@@ -27,6 +27,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -39,6 +40,8 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -164,9 +167,11 @@ internal fun SheetBackRow(onBack: () -> Unit) {
 
 /** A sheet body: the bounded outer box is already applied; this scrolls inside it. */
 @Composable
-internal fun SheetBody(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+internal fun SheetBody(modifier: Modifier = Modifier, scrollResetKey: Any? = Unit, content: @Composable () -> Unit) {
+  val scroll = rememberScrollState()
+  LaunchedEffect(scrollResetKey) { scroll.scrollTo(0) }
   Column(
-    modifier = modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
+    modifier = modifier.fillMaxSize().imePadding().verticalScroll(scroll).padding(horizontal = 20.dp),
   ) {
     content()
     Spacer(Modifier.height(20.dp))
@@ -198,12 +203,13 @@ internal fun SectionLabel(text: String, top: Int = 10) {
 
 /** Underline field. No outline box, no radius. */
 @Composable
-internal fun FlatField(value: String, onValueChange: (String) -> Unit, placeholder: String = "", modifier: Modifier = Modifier) {
+internal fun FlatField(value: String, onValueChange: (String) -> Unit, placeholder: String = "", modifier: Modifier = Modifier, secret: Boolean = false) {
   BasicTextField(
     value = value,
     onValueChange = onValueChange,
     modifier = modifier.fillMaxWidth(),
     singleLine = true,
+    visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
     textStyle = PiType.BodySmall.copy(color = PiForeground),
     cursorBrush = SolidColor(PiAccent),
     decorationBox = { inner ->
@@ -222,12 +228,12 @@ internal fun FlatField(value: String, onValueChange: (String) -> Unit, placehold
 
 /** A full-row choice; the whole band is the touch target. An unselected label is [PiMuted]. */
 @Composable
-internal fun PopupChoice(label: String, selected: Boolean, color: Color = PiMuted, onClick: () -> Unit) {
+internal fun PopupChoice(label: String, selected: Boolean, color: Color = PiMuted, enabled: Boolean = true, onClick: () -> Unit) {
   Row(
     Modifier
       .fillMaxWidth()
       .heightIn(min = PiSpace.Touch)
-      .clickable(onClick = onClick)
+      .clickable(enabled = enabled, onClick = onClick)
       .padding(end = PiSpace.Screen),
     verticalAlignment = Alignment.CenterVertically,
   ) {
@@ -241,7 +247,7 @@ internal fun PopupChoice(label: String, selected: Boolean, color: Color = PiMute
     Text(
       label,
       style = PiType.Ui,
-      color = if (selected) PiForeground else color,
+      color = if (!enabled) PiMuted else if (selected) PiForeground else color,
       modifier = Modifier.weight(1f),
     )
   }
@@ -249,9 +255,9 @@ internal fun PopupChoice(label: String, selected: Boolean, color: Color = PiMute
 
 /** One tappable line of monospace action text. */
 @Composable
-internal fun ActionRow(label: String, color: Color = PiForeground, onClick: () -> Unit) {
+internal fun ActionRow(label: String, color: Color = PiForeground, modifier: Modifier = Modifier, onClick: () -> Unit) {
   Box(
-    Modifier
+    modifier
       .fillMaxWidth()
       .heightIn(min = PiSpace.TouchMin)
       .clickable(onClick = onClick),

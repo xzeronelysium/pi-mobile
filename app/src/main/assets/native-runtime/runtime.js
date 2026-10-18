@@ -70076,6 +70076,31 @@ ${command}` : command,
     } : null;
   }
 
+  // src/models-store.mjs
+  init_buffer();
+  function createModelsStore(database) {
+    let opening, ready = () => opening ??= database.exec(
+      "CREATE TABLE IF NOT EXISTS provider_model_catalogs (provider_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL)"
+    ).catch((error) => {
+      throw opening = void 0, error;
+    });
+    return {
+      async read(providerId, options) {
+        options?.signal?.throwIfAborted(), await ready(), options?.signal?.throwIfAborted();
+        let row = await database.get("SELECT payload FROM provider_model_catalogs WHERE provider_id = ?", providerId);
+        return row ? JSON.parse(row.payload) : void 0;
+      },
+      async write(providerId, entry, options) {
+        options?.signal?.throwIfAborted();
+        let payload = JSON.stringify(entry);
+        await ready(), options?.signal?.throwIfAborted(), await database.run("INSERT OR REPLACE INTO provider_model_catalogs (provider_id, payload) VALUES (?, ?)", providerId, payload);
+      },
+      async delete(providerId, options) {
+        options?.signal?.throwIfAborted(), await ready(), options?.signal?.throwIfAborted(), await database.run("DELETE FROM provider_model_catalogs WHERE provider_id = ?", providerId);
+      }
+    };
+  }
+
   // src/fetch.mjs
   init_buffer();
   var CAPABILITIES_OP = "http.capabilities", REQUEST_OP = "http.request", CANCEL_OP = "http.cancel", HEAD_EVENT = "http.head", CHUNK_EVENT = "http.chunk", END_EVENT = "http.end", ERROR_EVENT = "http.error";
@@ -73168,6 +73193,12 @@ ${stderr}`);
     for (let provider of builtinProviders())
       models.setProvider(provider), catalog.push(providerRow(models, provider));
     return catalog.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)), catalog;
+  }
+  function updateProviderCatalog(models, catalog) {
+    for (let provider of models.getProviders()) {
+      let row = catalog.find((entry) => entry.id === provider.id);
+      row && Object.assign(row, providerRow(models, provider));
+    }
   }
   var THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"], ALL_LEVELS = ["off", ...THINKING_LEVELS];
   function modelRows(list) {
@@ -77152,7 +77183,9 @@ ${stderr}`);
         return login = null, bridge3.emit({ type: "auth.finished", provider, cancelled: !0 }), { cancelled: !0, provider };
       },
       async refresh(query = {}) {
-        let controller = new AbortController(), providers = typeof query.provider == "string" && query.provider ? [query.provider] : void 0, result = await models.refresh({ allowNetwork: query.allowNetwork !== !1, force: query.force === !0, ...providers ? { providers } : {}, signal: controller.signal }), value = { aborted: result.aborted === !0, errors: [...result.errors].map(([id, error]) => ({ id, message: message(error) })) };
+        let controller = new AbortController(), providers = typeof query.provider == "string" && query.provider ? [query.provider] : void 0, result = await models.refresh({ allowNetwork: query.allowNetwork !== !1, force: query.force === !0, ...providers ? { providers } : {}, signal: controller.signal });
+        updateProviderCatalog(models, catalog);
+        let value = { aborted: result.aborted === !0, errors: [...result.errors].map(([id, error]) => ({ id, message: message(error) })) };
         return bridge3.emit({ type: "refresh", value }), value;
       },
       /** Real image generation through the provider that owns the image model. */
@@ -79216,8 +79249,9 @@ printf ${PROBE_SCRIPT_OUTPUT}
   function createPiNative(bridge3, options = {}) {
     let opening, closed = !1;
     installOAuthFlows();
-    let credentials = createCredentialStore(bridge3.call), transport4 = options.fetch ?? createBridgeFetch(bridge3), models = withBridgeFetch(createModels({
+    let credentials = createCredentialStore(bridge3.call), database = createSqliteDatabase(bridge3.call), transport4 = options.fetch ?? createBridgeFetch(bridge3), models = withBridgeFetch(createModels({
       credentials,
+      modelsStore: createModelsStore(database),
       authContext: { env: async () => {
       }, fileExists: async () => !1 }
     }), transport4), catalog = installProviders(models), registry2 = createRegistry();
@@ -79282,8 +79316,12 @@ printf ${PROBE_SCRIPT_OUTPUT}
     };
     function init(options2 = {}) {
       return opening || (opening = (async () => {
-        let database = createSqliteDatabase(bridge3.call), storage = await SqliteStorage.open(database);
+        let storage = await SqliteStorage.open(database);
         await credentials.load();
+        let restored = await models.refresh({ allowNetwork: !1 });
+        for (let [provider, error] of restored.errors)
+          bridge3.emit({ type: "error", operation: "models.restore", provider, message: message(error) });
+        updateProviderCatalog(models, catalog);
         let env2 = createAndroidExecutionEnv({
           call: bridge3.call,
           cwd: typeof options2.workspace == "string" && options2.workspace ? options2.workspace : "/",

@@ -115,6 +115,7 @@ data class SettingsUiState(
   val effort: String = "Medium",
   val modelQuery: String = "",
   val connectQuery: String = "",
+  val operationQuery: String = "",
   /** Provider whose visibility checklist is open in the Model sheet. */
   val editingProvider: String? = null,
   val hiddenByProvider: Map<String, Set<String>> = emptyMap(),
@@ -141,16 +142,14 @@ object SettingsUiReducer {
    * the same tap cannot re-open the menu.
    */
   fun toggleChevron(state: SettingsUiState): SettingsUiState =
-    if (state.menuOpen || state.sheet != null) state.copy(menuOpen = false, sheet = null)
+    if (state.menuOpen || state.sheet != null) dismissSheet(state)
     else state.copy(menuOpen = true)
 
   /** Open exactly one sheet: the menu closes and any other sheet is replaced, never stacked. */
-  fun openSheet(state: SettingsUiState, sheet: PickerSheet): SettingsUiState = state.copy(
-    menuOpen = false,
-    sheet = sheet,
-    editingProvider = if (sheet == PickerSheet.Model) state.editingProvider else null,
-    apiKeyDraft = if (sheet == PickerSheet.Connect) state.apiKeyDraft else "",
-  )
+  fun openSheet(state: SettingsUiState, sheet: PickerSheet): SettingsUiState {
+    val base = if (state.sheet != sheet) dismissSheet(state) else state
+    return base.copy(menuOpen = false, sheet = sheet)
+  }
 
   /**
    * Close the open sheet. A sign-in that is still running is abandoned: its generation is bumped
@@ -173,6 +172,8 @@ object SettingsUiReducer {
 
   fun setModelQuery(state: SettingsUiState, query: String): SettingsUiState = state.copy(modelQuery = query)
 
+  fun setOperationQuery(state: SettingsUiState, query: String): SettingsUiState = state.copy(operationQuery = query)
+
   fun setConnectQuery(state: SettingsUiState, query: String): SettingsUiState = state.copy(connectQuery = query)
 
   fun setEditingProvider(state: SettingsUiState, provider: String?): SettingsUiState = state.copy(editingProvider = provider)
@@ -187,6 +188,7 @@ object SettingsUiReducer {
     selectedModel = option.modelId,
     effort = ModelCatalogReducer.clampEffort(option, state.effort),
     sheet = null,
+    editingProvider = null,
   )
 
   /** An effort the model cannot run is refused rather than stored and silently ignored upstream. */
@@ -201,6 +203,21 @@ object SettingsUiReducer {
 
   fun showAll(state: SettingsUiState, provider: String): SettingsUiState =
     state.copy(hiddenByProvider = ModelCatalogReducer.showProvider(state.hiddenByProvider, provider))
+
+  /** Search is a projection: it never changes the selected model or the visibility checklist. */
+  fun modelGroups(
+    groups: List<PickerProviderGroup>,
+    query: String,
+    editingProvider: String?,
+  ): List<PickerProviderGroup> {
+    if (query.isBlank()) return groups
+    return groups.mapNotNull { group ->
+      val providerMatches = group.providerName.contains(query.trim(), ignoreCase = true)
+      val matches = group.models.filter { providerMatches || ModelCatalogReducer.matches(it, query) }
+      val rows = if (editingProvider == group.provider) matches else matches.filter { it.modelId !in group.hiddenIds }
+      if (rows.isEmpty()) null else group.copy(models = matches)
+    }
+  }
 
   // ------------------------------------------------------------------ connect provider list
 
@@ -349,7 +366,7 @@ object SettingsUiReducer {
   fun promptAnswered(state: SettingsUiState, requestId: String): SettingsUiState {
     val session = state.signIn ?: return state
     if (session.prompt?.requestId != requestId) return state
-    return state.copy(signIn = session.copy(prompt = null))
+    return state.copy(signIn = session.copy(prompt = null, busy = true))
   }
 
   fun authSettled(state: SettingsUiState, generation: Long, event: DurableEvent.AuthSettled): SettingsUiState {

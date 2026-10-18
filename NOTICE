@@ -1,0 +1,20 @@
+Pi mobile — a Pi Durable client for Android.
+
+The app is a Kotlin/Compose shell around @earendil-works/pi-durable, which runs inside an
+application-owned WebView. Files, processes and storage are provided by Kotlin adapters
+(AndroidExecutionEnv): the shell is Android's own /system/bin/sh.
+
+No Node.js binary, Linux userland or other prebuilt executables are bundled. The only shipped
+JavaScript is the bundle built from `runtime/` (runtime/src -> app/src/main/assets/native-runtime).
+
+Third-party licences:
+
+  @earendil-works/pi-durable, @earendil-works/pi-ai, @earendil-works/chord
+  @earendil-works/pi-codemode (build-time)
+      MIT — https://github.com/earendil-works/pi
+
+  esbuild (build-time)
+      MIT — https://github.com/evanw/esbuild
+
+  AndroidX / Jetpack Compose
+      Apache License 2.0 — https://developer.android.com/jetpack

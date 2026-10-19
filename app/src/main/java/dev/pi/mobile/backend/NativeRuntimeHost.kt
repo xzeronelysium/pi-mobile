@@ -444,6 +444,35 @@ class NativeRuntimeHost(
       }
       report
     }
+    "py.run" -> {
+      // The same sandbox Worker, running Python on Pyodide: no module layer, no aliases — the
+      // interpreter is the module system. Everything else (declared inputs/outputs, caps, cancel,
+      // the report shape) is the js.run contract, so the tool side reads both identically. The
+      // pinned interpreter URL travels with the request: the tool owns the pin, this side only
+      // fetches it; the sandbox CSP is what decides which hosts are even loadable.
+      val requestId = args.optString("requestId").ifBlank { java.util.UUID.randomUUID().toString() }
+      val code = args.optString("code")
+      if (code.isBlank()) throw NativeFailure("invalid", "Python code required")
+      val imports = args.optJSONArray("imports") ?: JSONArray()
+      val pyodide = args.optJSONObject("pyodide")
+      fun files(key: String): List<File> {
+        val array = args.optJSONArray(key) ?: return emptyList()
+        return (0 until array.length()).map { index ->
+          val path = array.getString(index)
+          val routed = io.confine(path)
+          File(routed.root, routed.path).absoluteFile
+        }
+      }
+      val timeoutMs = args.optLong("timeoutMs", 120_000L).coerceIn(1L, 180_000L)
+      sandbox.run(
+        requestId, code,
+        imports, files("inputs"), files("outputs"), timeoutMs,
+        kind = "py",
+        pyodideUrl = pyodide?.optString("url") ?: "",
+        pyodideIndexUrl = pyodide?.optString("indexUrl") ?: "",
+      )
+    }
+    "py.cancel" -> { sandbox.cancel(args.getString("requestId")); null }
     "js.cancel" -> { sandbox.cancel(args.getString("requestId")); null }
     // Provider HTTP. Capabilities is how the JS transport decides it can route here at all; a build
     // without it falls back to the ambient fetch rather than failing every request.

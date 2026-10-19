@@ -270,6 +270,8 @@ test('the host offers the fetch_url tool, so a send carries it to the model', as
   assert.equal(body.includes('"bash"'), false, 'the upstream bash tool is not offered');
   assert.ok(body.includes('js_search'), 'the autonomous JS registry search tool is offered');
   assert.ok(body.includes('js_run'), 'the isolated JS sandbox tool is offered');
+  assert.ok(body.includes('py_resolve'), 'the PyPI resolver is offered alongside');
+  assert.ok(body.includes('py_run'), 'and the Python sandbox tool is offered');
 });
 
 test('initialization failure emits error and does not claim readiness', async () => {

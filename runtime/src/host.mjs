@@ -27,6 +27,7 @@ import { createBridgeFetch, withBridgeFetch } from './fetch.mjs';
 import { createFetchTools } from './fetch-tool.mjs';
 import { createAndroidShellTools } from './shell-tool.mjs';
 import { createJsTools } from './js-tools.mjs';
+import { createPyTools } from './py-tools.mjs';
 import { createRunScriptTools } from './run-script-tool.mjs';
 import { baseExtensions } from './skills.mjs';
 import { installProviders, updateProviderCatalog } from './providers.mjs';
@@ -91,6 +92,15 @@ export function createPiNative(bridge, options = {}) {
   // it in the Kotlin-side sandbox (no app bridge). The registry is the source; there is no
   // hand-curated catalog. `workspaceRoot` is read per call for the same reason as the fetch tool's.
   registry.install(createJsTools({
+    transport,
+    call: bridge.call,
+    workspaceRoot: () => state.workspaceRoot,
+  }));
+  // The autonomous Python package path, the mirror image of the JS one: resolve a known PyPI name
+  // to an exact pinned version, then run Python in the SAME Kotlin-side sandbox Worker (no app
+  // bridge) on Pyodide. No PyPI search endpoint exists, so there is no py_search — discovery is
+  // model knowledge, taught in the tool descriptions. `workspaceRoot` is read per call as above.
+  registry.install(createPyTools({
     transport,
     call: bridge.call,
     workspaceRoot: () => state.workspaceRoot,

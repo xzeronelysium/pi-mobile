@@ -4,6 +4,13 @@ Notable changes to Pi for Android are documented here. Entries are grouped by re
 
 ## Unreleased
 
+- Python joins the JS sandbox, the same way: `py_resolve` pins an exact PyPI version (pure-wheel
+  verdict included — py_search has no analogue because PyPI retired its search endpoint), and
+  `py_run` boots Pyodide (CPython on WebAssembly, pinned at v0.26.2 from jsDelivr) in the SAME
+  isolated Worker — no app bridge, declared inputs as memoryviews and outputs through the shared
+  `piWrite`, an async body, and every resolved package hashed into `.pi-py/lock.json`. micropip
+  installs pure-Python wheels from PyPI; numpy, pandas and friends ship inside Pyodide itself;
+  cold-start stays per run on purpose (the spawn-and-die guarantee comes first).
 - `js_run` gains workspace modules: the agent writes reusable `.mjs` files into the workspace and
   declares them, and the run body reaches them as `piModules` — real ESM that may import other
   declared modules with relative specifiers. The sandbox serves them under a per-run token URL with

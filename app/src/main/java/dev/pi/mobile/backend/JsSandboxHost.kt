@@ -63,9 +63,10 @@ internal class JsSandboxHost(private val context: Context) : Closeable {
   }
 
   /**
-   * Run [code] with [imports] resolved to URLs. Serialized: one sandbox run at a time, so a second
-   * call waits rather than creating a second WebView. Blocks the caller (the host's io worker) until
-   * the worker reports, times out, or is cancelled. Never invoke on the main thread.
+   * Run [code] with [imports] resolved to URLs (the JS import map) or as pinned package specs (the
+   * Python run's JSON array); [kind] decides which the worker does. Serialized: one sandbox run at
+   * a time, so a second call waits rather than creating a second WebView. Blocks the caller (the
+   * host's io worker) until the worker reports, times out, or is cancelled. Never on the main thread.
    *
    * [modules] carries declared workspace module sources, keyed by their workspace-relative path.
    * They are served back as real ESM under this run's own `https://pi.local/w/<path-unique-token>/…`
@@ -80,12 +81,15 @@ internal class JsSandboxHost(private val context: Context) : Closeable {
   fun run(
     requestId: String,
     code: String,
-    imports: JSONObject,
+    imports: Any,
     inputs: List<File>,
     outputs: List<File>,
     timeoutMs: Long,
     modules: Map<String, String> = emptyMap(),
     moduleAliases: Map<String, String> = emptyMap(),
+    kind: String = "js",
+    pyodideUrl: String = "",
+    pyodideIndexUrl: String = "",
   ): JSONObject = synchronized(runLock) {
     if (closed) return@synchronized JSONObject().put("ok", false).put("error", "The JS sandbox is closed")
     val inputFiles = inputs.associateBy { it.absolutePath }
@@ -115,10 +119,18 @@ internal class JsSandboxHost(private val context: Context) : Closeable {
       urlByKey[alias] = "https://pi.local$modulePrefix${Uri.encode(urlKey, "/")}"
     }
     val config = JSONObject()
+      .put("kind", kind)
       .put("requestId", requestId)
       .put("code", code)
       .put("imports", imports)
-      .put("modules", JSONObject(urlByKey))
+      .put(
+        "modules", JSONObject(urlByKey),
+      )
+      .putOpt("pyodide", if (kind == "py" && pyodideUrl.isNotEmpty()) {
+        JSONObject().put("url", pyodideUrl).put("indexUrl", pyodideIndexUrl)
+      } else {
+        null
+      })
       .put("inputs", JSONArray(inputFiles.keys.toList()))
       .put("outputs", JSONArray(outputFiles.keys.toList()))
     val run = Run(

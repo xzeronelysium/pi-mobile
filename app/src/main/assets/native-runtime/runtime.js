@@ -16913,29 +16913,29 @@ https://help.openai.com/en/articles/5112595-best-practices-for-api-key-safety
           if (props.options.stream || props.options.__binaryResponse || props.response.status === 204 || props.response.headers.get("content-length") === "0")
             return defaultParseResponse(client, props);
           for (; ; ) {
-            let attempt = __classPrivateFieldGet2(this, _OpenAI_responseAttempts, "f").get(props.controller), timeout = attempt?.timeout ?? props.options.timeout ?? this.timeout, x509Authentication = attempt?.authentication, callerSignal = x509Authentication ? props.controller.signal : props.options.signal, abortError7 = () => x509Authentication && callerSignal ? this._makeUserAbortError(callerSignal) : new APIUserAbortError(), remaining;
+            let attempt = __classPrivateFieldGet2(this, _OpenAI_responseAttempts, "f").get(props.controller), timeout = attempt?.timeout ?? props.options.timeout ?? this.timeout, x509Authentication = attempt?.authentication, callerSignal = x509Authentication ? props.controller.signal : props.options.signal, abortError8 = () => x509Authentication && callerSignal ? this._makeUserAbortError(callerSignal) : new APIUserAbortError(), remaining;
             try {
               remaining = x509Authentication?.remainingTimeout(props.options, timeout) ?? Math.max(0, props.startTime + timeout - Date.now());
             } catch (error) {
-              let cancellation = callerSignal?.aborted ? abortError7() : void 0;
+              let cancellation = callerSignal?.aborted ? abortError8() : void 0;
               throw props.controller.abort(), CancelReadableStream(props.response.body).catch(() => {
               }), cancellation ?? error;
             }
             let timer, abortListener, timedOut = !1;
             try {
               if (callerSignal?.aborted && attempt?.helperMethod !== "runTools")
-                throw abortError7();
+                throw abortError8();
               let timeoutPromise = new Promise((_, reject) => {
                 timer = setTimeout(() => {
                   timedOut = !0, props.controller.abort(), reject(new APIConnectionTimeoutError());
                 }, remaining), callerSignal && (abortListener = () => {
-                  timedOut || reject(abortError7());
+                  timedOut || reject(abortError8());
                 }, callerSignal.addEventListener("abort", abortListener, { once: !0 }));
               });
               return await Promise.race([defaultParseResponse(client, props), timeoutPromise]);
             } catch (error) {
               if (callerSignal?.aborted && !timedOut)
-                throw abortError7();
+                throw abortError8();
               if (!timedOut)
                 throw x509Authentication && error instanceof SyntaxError ? new SyntaxError("X.509 workload identity API response contains invalid JSON.") : x509Authentication && !(error instanceof OpenAIError) ? new APIConnectionError({
                   message: "X.509 workload identity API response body could not be read."
@@ -71196,13 +71196,270 @@ ${lockPath}`), {
     };
   }
 
+  // src/py-tools.mjs
+  init_buffer();
+  var PY_RESOLVE_TOOL_NAME = "py_resolve", PY_RUN_TOOL_NAME = "py_run", PY_EXTENSION_NAME = "py-sandbox", PYPI_JSON = "https://pypi.org/pypi", PYODIDE_VERSION = "0.26.2", PYODIDE_CDN = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full`, PY_LOCK_PATH = ".pi-py/lock.json", MAX_PY_CODE_BYTES = 256 * 1024, MAX_PY_IMPORTS = 12, MAX_FILES2 = 20, DEFAULT_RUN_TIMEOUT_MS2 = 12e4, MAX_RUN_TIMEOUT_MS2 = 18e4, PyToolError = class extends Error {
+    constructor(code, message3, cause) {
+      super(message3), this.name = "PyToolError", this.code = code, cause !== void 0 && (this.cause = cause);
+    }
+  }, abortError6 = (message3) => typeof DOMException == "function" ? new DOMException(message3, "AbortError") : Object.assign(new Error(message3), { name: "AbortError" }), textOf2 = (value) => typeof value == "string" ? value : "", truncate3 = (text3, limit3 = 256 * 1024) => text3.length > limit3 ? `${text3.slice(0, limit3)}
+\u2026[truncated at ${limit3} characters]\u2026` : text3;
+  function resolveInsideWorkspace2(root, target) {
+    let base = typeof root == "string" && root !== "" ? root : "/", path4 = resolve2(base, String(target));
+    if (!(base === "/" || path4 === base || path4.startsWith(`${base}/`))) throw new PyToolError("workspace_escape", `${target} is outside the workspace (${base})`);
+    return path4;
+  }
+  function createHttp2(transport4) {
+    if (typeof transport4 != "function") throw new TypeError("createPyTools requires the runtime transport");
+    return async function(url, timeoutMs = 15e3) {
+      let response;
+      try {
+        response = await transport4(url, {
+          method: "GET",
+          headers: { accept: "application/json" },
+          timeoutMs
+        });
+      } catch (error) {
+        throw new PyToolError("network_error", `Could not reach ${url}: ${error?.message ?? String(error)}`, error);
+      }
+      let body = await response.text();
+      if (!response.ok) {
+        let code = response.status === 404 ? "not_found" : "http_status";
+        throw new PyToolError(code, `${url} answered HTTP ${response.status}${body ? `: ${truncate3(body, 400)}` : ""}`);
+      }
+      try {
+        return JSON.parse(body);
+      } catch (error) {
+        throw new PyToolError("invalid_response", `${url} did not return JSON`, error);
+      }
+    };
+  }
+  function chooseFile(entries) {
+    let files = (Array.isArray(entries) ? entries : []).filter((entry) => typeof entry?.filename == "string"), pure = files.find((entry) => /py3-none-any\.whl$/i.test(entry.filename)) ?? files.find((entry) => /py2\.py3-none-any\.whl$/i.test(entry.filename));
+    if (pure !== void 0) return { file: pure, pure: !0, warnings: [] };
+    let platform = files.find((entry) => entry.filename.endsWith(".whl"));
+    if (platform !== void 0)
+      return { file: platform, pure: !1, warnings: [`non-pure wheel: ${platform.filename} will not install in the sandbox`] };
+    let sdist = files.find((entry) => entry.filename.endsWith(".tar.gz")) ?? files[0];
+    return sdist !== void 0 ? { file: sdist, pure: !1, warnings: [`no wheel for this version: ${sdist.filename} cannot install in the sandbox`] } : null;
+  }
+  async function pypiDoc(getJson, name, timeoutMs) {
+    return getJson(`${PYPI_JSON}/${name}/json`, timeoutMs);
+  }
+  function packageSummary2(doc, chosenVersion, warn) {
+    let info = doc?.info ?? {};
+    return {
+      name: textOf2(info.name),
+      version: chosenVersion,
+      summary: textOf2(info.summary),
+      license: textOf2(info.license) || null,
+      homepage: textOf2(info.home_page) || textOf2(info.project_urls?.Homepage) || null,
+      requiresPython: textOf2(info.requires_python) || null,
+      ...warn ?? { pure: null, warnings: [] }
+    };
+  }
+  function createPyTools({ transport: transport4, call, workspaceRoot } = {}) {
+    if (typeof call != "function") throw new TypeError("createPyTools requires the bridge call");
+    let getJson = createHttp2(transport4), rootOf = typeof workspaceRoot == "function" ? workspaceRoot : () => typeof workspaceRoot == "string" ? workspaceRoot : "/", nextRun = 0;
+    async function resolvePackage(name, version, timeoutMs) {
+      if (typeof name != "string" || name.trim() === "")
+        throw new PyToolError("invalid_name", "name is required");
+      let doc = await pypiDoc(getJson, name.trim(), timeoutMs), chosen = version === void 0 || version === "" ? doc?.info?.version : String(version), versioned = doc?.urls ?? [];
+      if ((doc?.info?.version ?? "") !== chosen) {
+        if (!doc?.releases?.[chosen]) throw new PyToolError("version_not_found", `${name} has no version ${chosen}`);
+        versioned = doc.releases[chosen];
+      }
+      let pick = chooseFile(versioned);
+      if (pick === null) throw new PyToolError("no_files", `${name} ${chosen} has no installable file entry`);
+      return {
+        ...packageSummary2(doc, chosen),
+        resolved: `${name.trim()}==${chosen}`,
+        filename: pick.file.filename,
+        bytes: Number.isFinite(pick.file.size) ? pick.file.size : null,
+        sha256: typeof pick.file.digests?.sha256 == "string" ? pick.file.digests.sha256 : null,
+        url: pick.file.url,
+        pure: pick.pure,
+        warnings: pick.warnings
+      };
+    }
+    async function writeLock(resolved, context2) {
+      let path4 = resolveInsideWorkspace2(rootOf(), PY_LOCK_PATH), existing = {};
+      try {
+        let raw = await call("file.read", { path: path4 });
+        typeof raw == "string" && raw.trim() !== "" && (existing = JSON.parse(raw));
+      } catch {
+      }
+      let packages = { ...existing.packages ?? {} };
+      for (let entry of resolved)
+        packages[entry.name] = {
+          name: entry.name,
+          version: entry.version,
+          source: entry.source,
+          resolved: entry.resolved,
+          integrity: entry.sha256,
+          pure: entry.pure
+        };
+      let value = {
+        version: 1,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        packages
+      };
+      try {
+        return await call("file.write", { path: path4, text: `${JSON.stringify(value, null, 2)}
+` }), path4;
+      } catch (error) {
+        return context2?.api?.diagnostic?.({
+          severity: "warn",
+          code: "lock_write_failed",
+          message: `The Python lockfile could not be written: ${error?.message ?? String(error)}`
+        }), null;
+      }
+    }
+    let resolveTool = {
+      name: PY_RESOLVE_TOOL_NAME,
+      description: `Resolve a PyPI package name to an exact version, the wheel a pure-Python install would use, its SHA-256 and a purity verdict. This is also the metadata lookup (there is no PyPI search endpoint; discovery is your own knowledge): ${PY_RUN_TOOL_NAME} pins what this returns, reaching it as the resolved package inside the Pyodide interpreter.`,
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: 'Package name, e.g. "pypdf".' },
+          version: { type: "string", description: "Exact version. Omit for latest. Ranges are not supported by design." },
+          timeoutMs: { type: "integer", description: "Abort the metadata request after this many milliseconds." }
+        },
+        required: ["name"],
+        additionalProperties: !1
+      },
+      async execute(args, api) {
+        let info = await resolvePackage(args?.name, args?.version, args?.timeoutMs), blocks = [JSON.stringify(info, null, 2)];
+        return info.pure !== !0 && blocks.push(`\u26A0 ${info.warnings.join("; ")}`), api?.diagnostic?.({
+          severity: info.pure === !0 ? "info" : "warn",
+          code: "py_purity",
+          message: `${info.name} ${info.version}: ${info.pure === !0 ? "pure wheel" : info.warnings.join("; ")}`
+        }), {
+          content: [{ type: "text", text: truncate3(blocks.join(`
+
+`)) }],
+          details: info
+        };
+      }
+    }, runTool = {
+      name: PY_RUN_TOOL_NAME,
+      description: "Run Python in the isolated sandbox on Pyodide (CPython compiled to WebAssembly). The sandbox has no app bridge: it exposes piInputs (declared input files as memoryview, keyed by absolute path \u2014 use .tobytes().decode() for text), piInputPaths (those absolute paths as a list), piWrite(path, bytes) for declared output files, piOutputs (those absolute paths as a list), and print/stdout (which becomes the run's log). Declared packages are installed with micropip from PyPI \u2014 pure-Python wheels only; numpy, pandas, pillow and the like ship inside Pyodide itself. The body is indented function code dedented automatically and runs inside `async def __pi_main__():`, so await and return both work and the return value must be JSON-safe (use .dumps if in doubt). A successful run pins every resolved package into .pi-py/lock.json. Known-good packages: pypdf, pdfminer.six, python-docx, openpyxl, pytz, six.",
+      parameters: {
+        type: "object",
+        properties: {
+          code: { type: "string", description: "Python body. Use piInputs, piInputPaths, piWrite, piOutputs, print. return the result." },
+          imports: {
+            type: "array",
+            items: { type: "string" },
+            description: "PyPI package names to resolve to an exact version and install with micropip."
+          },
+          inputs: { type: "array", items: { type: "string" }, description: "Workspace files to expose in piInputs." },
+          outputs: { type: "array", items: { type: "string" }, description: "Workspace files piWrite may create." },
+          timeoutMs: { type: "integer", description: "Kill the sandbox after this many milliseconds. Default 120000; max 180000." }
+        },
+        required: ["code"],
+        additionalProperties: !1
+      },
+      async execute(args, api, context2) {
+        let code = args?.code;
+        if (typeof code != "string" || code.trim() === "") throw new PyToolError("invalid_code", "code is required");
+        if (new TextEncoder().encode(code).length > MAX_PY_CODE_BYTES)
+          throw new PyToolError("code_too_large", `code exceeds ${MAX_PY_CODE_BYTES} bytes`);
+        let imports = stringArray2(args?.imports, "imports", MAX_PY_IMPORTS), inputs = stringArray2(args?.inputs, "inputs", MAX_FILES2), outputs = stringArray2(args?.outputs, "outputs", MAX_FILES2), root = rootOf(), inputPaths = inputs.map((path4) => resolveInsideWorkspace2(root, path4)), outputPaths = outputs.map((path4) => resolveInsideWorkspace2(root, path4)), timeoutMs = args?.timeoutMs === void 0 ? DEFAULT_RUN_TIMEOUT_MS2 : Math.min(Math.max(Number(args.timeoutMs), 1), MAX_RUN_TIMEOUT_MS2), resolved = [];
+        for (let name of imports)
+          resolved.push(await resolvePackage(name, void 0, void 0));
+        let requestId3 = `py-run-${++nextRun}`, signal = context2?.abortSignal;
+        if (signal?.aborted === !0) throw abortError6("The Python run was aborted before it started");
+        let onAbort = () => {
+          call("py.cancel", { requestId: requestId3 }).catch(() => {
+          });
+        };
+        typeof signal?.addEventListener == "function" && signal.addEventListener("abort", onAbort, { once: !0 });
+        let value;
+        try {
+          value = await call("py.run", {
+            code,
+            imports: resolved.map((entry) => entry.resolved),
+            pyodide: { url: `${PYODIDE_CDN}/pyodide.mjs`, indexUrl: `${PYODIDE_CDN}/` },
+            inputs: inputPaths,
+            outputs: outputPaths,
+            timeoutMs,
+            requestId: requestId3
+          });
+        } catch (error) {
+          throw signal?.aborted === !0 ? abortError6("The Python run was aborted") : new PyToolError("sandbox_error", `The Python sandbox refused the run: ${error?.message ?? String(error)}`, error);
+        } finally {
+          typeof signal?.removeEventListener == "function" && signal.removeEventListener("abort", onAbort);
+        }
+        if (value?.cancelled === !0 || signal?.aborted === !0) throw abortError6("The Python run was aborted");
+        if (value?.timedOut === !0) throw new PyToolError("timeout", `The Python run timed out after ${timeoutMs} ms`);
+        if (value?.ok !== !0)
+          throw new PyToolError("sandbox_error", textOf2(value?.error) || "The Python sandbox failed without an error");
+        let lockPath = await writeLock(resolved, { api }), logs = Array.isArray(value.logs) ? value.logs.map((entry) => String(entry)).slice(0, 200) : [], resultText = value.result === void 0 ? "" : truncate3(safeText(value.result)), blocks = [];
+        return logs.length > 0 && blocks.push(`[logs]
+${truncate3(logs.join(`
+`))}`), resultText !== "" && resultText !== "null" && blocks.push(`[result]
+${resultText}`), Array.isArray(value.outputs) && value.outputs.length > 0 && blocks.push(`[outputs]
+${value.outputs.join(`
+`)}`), blocks.length === 0 && blocks.push("The Python run completed without a result."), lockPath !== null && blocks.push(`[lock]
+${lockPath}`), {
+          content: [{ type: "text", text: blocks.join(`
+
+`) }],
+          details: {
+            imports: resolved.map((entry) => ({
+              name: entry.name,
+              version: entry.version,
+              source: entry.source,
+              resolved: entry.resolved,
+              integrity: entry.sha256,
+              pure: entry.pure
+            })),
+            inputs: inputPaths,
+            outputs: outputPaths,
+            logs,
+            result: resultText,
+            lockPath
+          }
+        };
+      }
+    };
+    return {
+      name: PY_EXTENSION_NAME,
+      tools: [resolveTool, runTool]
+    };
+  }
+  function safeText(result) {
+    if (result === void 0) return "";
+    if (typeof result == "string")
+      try {
+        return JSON.stringify(JSON.parse(result));
+      } catch {
+        return result;
+      }
+    try {
+      return JSON.stringify(result);
+    } catch {
+      return String(result);
+    }
+  }
+  function stringArray2(value, field, max) {
+    if (value == null) return [];
+    if (!Array.isArray(value)) throw new PyToolError("invalid_arguments", `${field} must be an array`);
+    if (value.length > max) throw new PyToolError("invalid_arguments", `${field} may hold at most ${max} entries`);
+    return value.map((entry) => {
+      if (typeof entry != "string" || entry.trim() === "") throw new PyToolError("invalid_arguments", `${field} entries must be non-empty strings`);
+      return entry.trim();
+    });
+  }
+
   // src/run-script-tool.mjs
   init_buffer();
   var RUN_SCRIPT_TOOL_NAME = "run_script", RUN_SCRIPT_EXTENSION_NAME = "scripts", RunScriptToolError = class extends Error {
     constructor(code, message3, cause) {
       super(message3), this.name = "RunScriptToolError", this.code = code, cause !== void 0 && (this.cause = cause);
     }
-  }, abortError6 = (message3) => typeof DOMException == "function" ? new DOMException(message3, "AbortError") : Object.assign(new Error(message3), { name: "AbortError" }), byteLength2 = (text3) => new TextEncoder().encode(text3).length, textOf2 = (value) => typeof value == "string" ? value : "", codeOf = (error, fallback) => typeof error?.code == "string" && error.code !== "" ? error.code : fallback;
+  }, abortError7 = (message3) => typeof DOMException == "function" ? new DOMException(message3, "AbortError") : Object.assign(new Error(message3), { name: "AbortError" }), byteLength2 = (text3) => new TextEncoder().encode(text3).length, textOf3 = (value) => typeof value == "string" ? value : "", codeOf = (error, fallback) => typeof error?.code == "string" && error.code !== "" ? error.code : fallback;
   function resolveScriptPath(root, target) {
     let base = typeof root == "string" && root !== "" ? root : "/", path4 = resolve2(base, String(target));
     if (!(base === "/" || path4 === base || path4.startsWith(`${base}/`)))
@@ -71258,7 +71515,7 @@ ${lockPath}`), {
         if (typeof raw != "string" || raw.trim() === "")
           throw new RunScriptToolError("invalid_path", "path is required and must be the script file to run");
         let scriptArgs = parseArguments2(args?.args), limits = await resolveLimits(), timeoutMs = parseTimeout(args?.timeoutMs, limits), path4 = resolveScriptPath(rootOf(), raw), argv = [SHELL_EXECUTABLE, path4, ...scriptArgs], signal = context2?.abortSignal;
-        if (signal?.aborted === !0) throw abortError6("The script run was aborted");
+        if (signal?.aborted === !0) throw abortError7("The script run was aborted");
         let stat;
         try {
           stat = await call("file.stat", { path: path4, follow: !0 });
@@ -71276,12 +71533,12 @@ ${lockPath}`), {
         try {
           value = await call("shell.exec", { command: argv, timeoutMs, requestId: requestId3 });
         } catch (error) {
-          throw signal?.aborted === !0 ? abortError6("The script run was aborted") : new RunScriptToolError(codeOf(error, "shell_error"), `Could not run ${path4}: ${error?.message ?? String(error)}`, error);
+          throw signal?.aborted === !0 ? abortError7("The script run was aborted") : new RunScriptToolError(codeOf(error, "shell_error"), `Could not run ${path4}: ${error?.message ?? String(error)}`, error);
         } finally {
           typeof signal?.removeEventListener == "function" && signal.removeEventListener("abort", onAbort);
         }
-        if (signal?.aborted === !0) throw abortError6("The script run was aborted");
-        let stdout = textOf2(value?.stdout), stderr = textOf2(value?.stderr), exitCode = Number.isInteger(value?.exitCode) ? value.exitCode : null, timedOut = value?.timedOut === !0, cancelled = value?.cancelled === !0, drainIncomplete = value?.drainIncomplete === !0, streamTruncated = value?.streamTruncated === !0, stdoutBytes = byteLength2(stdout), stderrBytes = byteLength2(stderr), stdoutTruncated = value?.stdoutTruncated === !0, stderrTruncated = value?.stderrTruncated === !0, truncatedStreams = [];
+        if (signal?.aborted === !0) throw abortError7("The script run was aborted");
+        let stdout = textOf3(value?.stdout), stderr = textOf3(value?.stderr), exitCode = Number.isInteger(value?.exitCode) ? value.exitCode : null, timedOut = value?.timedOut === !0, cancelled = value?.cancelled === !0, drainIncomplete = value?.drainIncomplete === !0, streamTruncated = value?.streamTruncated === !0, stdoutBytes = byteLength2(stdout), stderrBytes = byteLength2(stderr), stdoutTruncated = value?.stdoutTruncated === !0, stderrTruncated = value?.stderrTruncated === !0, truncatedStreams = [];
         stdoutTruncated && truncatedStreams.push("stdout"), stderrTruncated && truncatedStreams.push("stderr");
         let truncated2 = truncatedStreams.length > 0, usedTimeoutMs = Number.isInteger(value?.timeoutMs) ? value.timeoutMs : timeoutMs, blocks = [`$ ${argv.join(" ")}`, `exit code: ${exitCode === null ? "none" : String(exitCode)}`];
         stdout !== "" && blocks.push(stdout), stderr !== "" && blocks.push(`[stderr]
@@ -76447,14 +76704,14 @@ ${stderr}`);
   // src/ui.mjs
   init_buffer();
   var TOOL_STATUS = { pending: "pending", ok: "ok", error: "error" };
-  function textOf3(content) {
+  function textOf4(content) {
     return typeof content == "string" ? content : Array.isArray(content) ? content.filter((block) => block?.type === "text" && typeof block.text == "string").map((block) => block.text).join("") : "";
   }
   function rowKey(entry, suffix) {
     return `${entry.id ?? "?"}:${suffix}`;
   }
   function userRows(entry, message3) {
-    let text3 = textOf3(message3.content), others = Array.isArray(message3.content) ? message3.content.filter((block) => block?.type !== "text").length : 0;
+    let text3 = textOf4(message3.content), others = Array.isArray(message3.content) ? message3.content.filter((block) => block?.type !== "text").length : 0;
     return [{
       key: rowKey(entry, "user"),
       role: "user",
@@ -76465,7 +76722,7 @@ ${stderr}`);
   }
   function assistantRows(entry, message3, tools) {
     let rows = [];
-    return (Array.isArray(message3.content) ? message3.content : [{ type: "text", text: textOf3(message3.content) }]).forEach((block, index3) => {
+    return (Array.isArray(message3.content) ? message3.content : [{ type: "text", text: textOf4(message3.content) }]).forEach((block, index3) => {
       if (block?.type === "text") {
         block.text?.length && rows.push({ key: rowKey(entry, `text${index3}`), role: "assistant", text: block.text, timestamp: message3.timestamp ?? null });
         return;
@@ -76489,7 +76746,7 @@ ${stderr}`);
     }), message3.stopReason === "error" && message3.errorMessage && rows.push({ key: rowKey(entry, "error"), role: "notice", text: message3.errorMessage }), rows;
   }
   function toolResultRows(entry, message3, tools) {
-    let output = textOf3(message3.content), status = message3.isError ? TOOL_STATUS.error : TOOL_STATUS.ok, existing = message3.toolCallId ? tools.get(message3.toolCallId) : void 0;
+    let output = textOf4(message3.content), status = message3.isError ? TOOL_STATUS.error : TOOL_STATUS.ok, existing = message3.toolCallId ? tools.get(message3.toolCallId) : void 0;
     return existing ? (existing.status = status, existing.output = output, existing.durationMs = message3.durationMs ?? null, []) : [{
       key: rowKey(entry, "toolresult"),
       role: "tool",
@@ -78209,7 +78466,7 @@ ${stderr}`);
     fetch_url: { fails: !0, describe: "fetch a URL with the native transport" },
     ask: { fails: !1, describe: "pause the run and ask the person a question" }
   }), CAPABILITY_NAMES = Object.freeze(Object.keys(CAPABILITIES)), CAPABILITY_LIST = CAPABILITY_NAMES.join(", ");
-  function resolveInsideWorkspace2(workspace, target) {
+  function resolveInsideWorkspace3(workspace, target) {
     let base = typeof workspace == "string" && workspace !== "" ? workspace : "/", path4 = resolve2(base, String(target));
     if (!(base === "/" || path4 === base || path4.startsWith(`${base}/`))) throw new CapabilityError("workspace_escape", `${target} is outside the workspace (${base})`);
     return path4;
@@ -78259,7 +78516,7 @@ ${stderr}`);
     try {
       shell = await callShell(context2, {
         command: args.command,
-        ...args.cwd === void 0 ? {} : { cwd: resolveInsideWorkspace2(context2.workspace, args.cwd) },
+        ...args.cwd === void 0 ? {} : { cwd: resolveInsideWorkspace3(context2.workspace, args.cwd) },
         ...args.timeoutMs === void 0 ? {} : { timeoutMs: args.timeoutMs }
       });
     } catch (cause) {
@@ -78269,7 +78526,7 @@ ${stderr}`);
     return failure === null ? { ok: !0, result, error: null } : { ok: !1, result, error: failure };
   }
   async function runScript(args, context2) {
-    let path4 = resolveInsideWorkspace2(context2.workspace, args.path);
+    let path4 = resolveInsideWorkspace3(context2.workspace, args.path);
     if (context2.abortSignal?.aborted === !0) throw new CapabilityError("cancelled", "the script run was aborted before it started");
     let stat;
     try {
@@ -78292,7 +78549,7 @@ ${stderr}`);
     return failure === null ? { ok: !0, result, error: null } : { ok: !1, result, error: failure };
   }
   async function readFile(args, context2) {
-    let path4 = resolveInsideWorkspace2(context2.workspace, args.path), value;
+    let path4 = resolveInsideWorkspace3(context2.workspace, args.path), value;
     try {
       value = await context2.call("file.read", { path: path4 });
     } catch (cause) {
@@ -78302,7 +78559,7 @@ ${stderr}`);
     return { ok: !0, result: { path: path4, text: contents, bytes: bytesOf(contents) }, error: null };
   }
   async function writeFile(args, context2) {
-    let path4 = resolveInsideWorkspace2(context2.workspace, args.path);
+    let path4 = resolveInsideWorkspace3(context2.workspace, args.path);
     try {
       await context2.call("file.write", { path: path4, text: args.text });
     } catch (cause) {
@@ -78948,7 +79205,7 @@ ${stderr}`);
     constructor(code, message3) {
       super(message3), this.name = "FlowToolError", this.code = code;
     }
-  }, OPERATORS = describeConditions().map((entry) => `${entry.operator} over ${entry.over}`).join("; "), CAPABILITIES2 = describeCapabilities().map((entry) => `${entry.name} (${entry.does}${entry.canFail ? ", can fail" : ", cannot fail"})`).join("; "), FORMAT_HELP = `A flow is one JSON spec the agent writes into its workspace at .${FLOW_SPEC_DIR}/<name>.json and then runs by the name the spec declares. Spec shape: ${describeFormat().join(" ")} Capabilities: ${CAPABILITIES2}. Condition operators: ${OPERATORS}. After every step the reserved state field "last" holds that step's own outcome { step, ok, result, error }; "next" is taken when ok is true and "onFailure" when it is false. An argument value that is the string "$field.path" is read from the flow state before the step runs. An "ask" step PAUSES the whole run and waits for a person: a flow that reaches one does not finish on its own, it comes back paused, and it is continued with resume_flow. A complete example spec: ${JSON.stringify(FLOW_SPEC_EXAMPLE)}`, FORMAT_POINTER = `Flows are the agent-authored JSON specs under <workspace>/.${FLOW_SPEC_DIR}/<name>.json; the format, the capability list (${CAPABILITY_NAMES.join(", ")}) and the reserved "last" field are described by ${LIST_FLOWS_TOOL_NAME} and ${RUN_FLOW_TOOL_NAME}.`, textOf4 = (parts2) => parts2.filter(Boolean).join(`
+  }, OPERATORS = describeConditions().map((entry) => `${entry.operator} over ${entry.over}`).join("; "), CAPABILITIES2 = describeCapabilities().map((entry) => `${entry.name} (${entry.does}${entry.canFail ? ", can fail" : ", cannot fail"})`).join("; "), FORMAT_HELP = `A flow is one JSON spec the agent writes into its workspace at .${FLOW_SPEC_DIR}/<name>.json and then runs by the name the spec declares. Spec shape: ${describeFormat().join(" ")} Capabilities: ${CAPABILITIES2}. Condition operators: ${OPERATORS}. After every step the reserved state field "last" holds that step's own outcome { step, ok, result, error }; "next" is taken when ok is true and "onFailure" when it is false. An argument value that is the string "$field.path" is read from the flow state before the step runs. An "ask" step PAUSES the whole run and waits for a person: a flow that reaches one does not finish on its own, it comes back paused, and it is continued with resume_flow. A complete example spec: ${JSON.stringify(FLOW_SPEC_EXAMPLE)}`, FORMAT_POINTER = `Flows are the agent-authored JSON specs under <workspace>/.${FLOW_SPEC_DIR}/<name>.json; the format, the capability list (${CAPABILITY_NAMES.join(", ")}) and the reserved "last" field are described by ${LIST_FLOWS_TOOL_NAME} and ${RUN_FLOW_TOOL_NAME}.`, textOf5 = (parts2) => parts2.filter(Boolean).join(`
 `), textResult = (text3, details) => ({ content: [{ type: "text", text: text3 }], ...details === void 0 ? {} : { details } }), errorResult = (text3, details) => ({ content: [{ type: "text", text: text3 }], isError: !0, ...details === void 0 ? {} : { details } }), errorLines = (errors) => (errors ?? []).map((error) => `- ${error.message}`);
   function renderRun(summary) {
     let awaiting = summary?.awaiting, paused = summary?.status === "paused" && awaiting !== void 0 && awaiting !== null, lines2 = [
@@ -78987,7 +79244,7 @@ ${stderr}`);
         `No flow named "${name}" is available.`,
         `flows this runtime can run: ${known.length === 0 ? "(none)" : known.join(", ")}`
       ], errors = errorLines(discovery.errors);
-      return errors.length > 0 ? lines2.push("specs that could not be loaded (fix the file, then try again):", ...errors) : lines2.push(`no spec files were found under ${discovery.dir}; write one there and try again`), errorResult(textOf4(lines2), { flow: name, known, errors: (discovery.errors ?? []).map((error) => ({ path: error.path, code: error.code, message: error.message })) });
+      return errors.length > 0 ? lines2.push("specs that could not be loaded (fix the file, then try again):", ...errors) : lines2.push(`no spec files were found under ${discovery.dir}; write one there and try again`), errorResult(textOf5(lines2), { flow: name, known, errors: (discovery.errors ?? []).map((error) => ({ path: error.path, code: error.code, message: error.message })) });
     }, executeRun = async (work) => {
       try {
         return await work();
@@ -79018,7 +79275,7 @@ ${stderr}`);
             lines2.push("spec files:"), specs.length === 0 && lines2.push("  (none)");
             for (let spec of specs) lines2.push(`  ${spec.path} \u2192 ${spec.name}`);
             let errors = errorLines(discovery.errors);
-            return errors.length > 0 && lines2.push("specs that could not be loaded (fix the file, then try again):", ...errors), textResult(textOf4(lines2), {
+            return errors.length > 0 && lines2.push("specs that could not be loaded (fix the file, then try again):", ...errors), textResult(textOf5(lines2), {
               flows: flows.map((flow) => flow.name),
               specs: specs.map((spec) => ({ name: spec.name, path: spec.path })),
               errors: (discovery.errors ?? []).map((error) => ({ path: error.path, code: error.code, message: error.message }))
@@ -79085,7 +79342,7 @@ ${stderr}`);
               `flow "${status.flow}" is ${status.status} (thread ${status.threadId}, seq ${status.seq})`,
               `steps: ${(status.steps ?? []).join(", ") || "(none)"}`
             ];
-            return status.awaiting && (lines2.push(`paused on: ${(status.awaiting.steps ?? []).join(", ")} \u2014 awaiting a person`), lines2.push(`continue it with ${RESUME_FLOW_TOOL_NAME} and threadId ${status.threadId}`)), status.error && lines2.push(`last failure: ${JSON.stringify(status.error)}`), lines2.push(`state: ${JSON.stringify(status.state ?? {})}`), lines2.push(`checkpoints (newest first): ${(status.checkpoints ?? []).map((entry) => `${entry.seq}:${entry.status}`).join(", ")}`), textResult(textOf4(lines2), {
+            return status.awaiting && (lines2.push(`paused on: ${(status.awaiting.steps ?? []).join(", ")} \u2014 awaiting a person`), lines2.push(`continue it with ${RESUME_FLOW_TOOL_NAME} and threadId ${status.threadId}`)), status.error && lines2.push(`last failure: ${JSON.stringify(status.error)}`), lines2.push(`state: ${JSON.stringify(status.state ?? {})}`), lines2.push(`checkpoints (newest first): ${(status.checkpoints ?? []).map((entry) => `${entry.seq}:${entry.status}`).join(", ")}`), textResult(textOf5(lines2), {
               flow: status.flow,
               threadId: status.threadId,
               status: status.status,
@@ -79288,6 +79545,10 @@ printf ${PROBE_SCRIPT_OUTPUT}
     registry2.install(createAndroidShellTools({ shellLimits }));
     let hostState = createHostState({ bridge: bridge3, context }), { state: state3, requireOpen, switchGuard, conversationIdOf, historyFrame, restartEvents, activate, emitConversations, resumeRequested } = hostState;
     registry2.install(createFetchTools({ transport: transport4, call: bridge3.call, workspaceRoot: () => state3.workspaceRoot })), registry2.install(createJsTools({
+      transport: transport4,
+      call: bridge3.call,
+      workspaceRoot: () => state3.workspaceRoot
+    })), registry2.install(createPyTools({
       transport: transport4,
       call: bridge3.call,
       workspaceRoot: () => state3.workspaceRoot

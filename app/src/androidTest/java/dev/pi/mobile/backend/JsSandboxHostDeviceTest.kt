@@ -3,7 +3,9 @@ package dev.pi.mobile.backend
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import android.content.Context
+import org.json.JSONArray
 import org.json.JSONObject
+import org.junit.AfterClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -14,88 +16,92 @@ import java.util.UUID
 /**
  * The isolated JS sandbox, on a real WebView.
  *
- * This is the part a JVM test cannot prove: an unattached/1x1 WebView must actually load
+ * This is the part a JVM test cannot prove: an unattached WebView must actually load
  * `https://pi.local/sandbox.html`, evaluate `new Function` under the sandbox CSP, read a declared
- * input, write a declared output, and report through the narrow bridge.
+ * input, write a declared output, and report through the narrow bridge — and for Python, boot
+ * Pyodide and reach PyPI through micropip.
+ *
+ * The class shares ONE host (and so one sandbox WebView), because the app does: a fresh page per
+ * run is slower and a far bigger memory footprint, and this suite boots Pyodide. The runs are
+ * still isolated from each other — the worker is terminated after each, and the page mediates
+ * every read and write against the run's own declared paths.
  */
 @RunWith(AndroidJUnit4::class)
 class JsSandboxHostDeviceTest {
-  private fun sandbox() = JsSandboxHost(ApplicationProvider.getApplicationContext<Context>())
+  companion object {
+    private val sharedHost = JsSandboxHost(ApplicationProvider.getApplicationContext<Context>())
 
-  @Test fun evaluatesCodeAndReportsAJsonResult() {
-    val host = sandbox()
-    try {
-      val result = host.run("test-basic", "return 1 + 1;", JSONObject(), emptyList(), emptyList(), 10_000)
-      assertEquals(result.toString(), true, result.optBoolean("ok"))
-      assertEquals(2, result.optInt("result"))
-      assertEquals(0, result.optJSONArray("logs")?.length() ?: 0)
-    } finally {
-      host.close()
+    @AfterClass
+    @JvmStatic
+    fun closeHost() {
+      sharedHost.close()
     }
   }
 
+  @Test fun evaluatesCodeAndReportsAJsonResult() {
+    val host = sharedHost
+    val result = host.run("test-basic", "return 1 + 1;", JSONObject(), emptyList(), emptyList(), 10_000)
+    assertEquals(result.toString(), true, result.optBoolean("ok"))
+    assertEquals(2, result.optInt("result"))
+    assertEquals(0, result.optJSONArray("logs")?.length() ?: 0)
+  }
+
   @Test fun readsOnlyDeclaredInputsAndWritesOnlyDeclaredOutputs() {
+    val host = sharedHost
     val root = File(ApplicationProvider.getApplicationContext<Context>().cacheDir, "js-sandbox-${UUID.randomUUID()}").apply { mkdirs() }
-    val input = File(root, "input.txt").apply { writeText("hello") }
-    val output = File(root, "output.txt")
-    val code = """
-      const key = Object.keys(piInputs)[0];
-      const text = new TextDecoder().decode(piInputs[key]);
-      await piWrite(${JSONObject.quote(output.absolutePath)}, text.toUpperCase());
-      return text.length;
-    """.trimIndent()
-    val host = sandbox()
     try {
+      val input = File(root, "input.txt").apply { writeText("hello") }
+      val output = File(root, "output.txt")
+      val code = """
+        const key = Object.keys(piInputs)[0];
+        const text = new TextDecoder().decode(piInputs[key]);
+        await piWrite(${JSONObject.quote(output.absolutePath)}, text.toUpperCase());
+        return text.length;
+      """.trimIndent()
       val result = host.run("test-io", code, JSONObject(), listOf(input), listOf(output), 10_000)
       assertEquals(result.toString(), true, result.optBoolean("ok"))
       assertEquals(5, result.optInt("result"))
       assertEquals("HELLO", output.readText())
     } finally {
-      host.close()
       root.deleteRecursively()
     }
   }
 
   @Test fun anUndeclaredOutputWriteFailsTheRun() {
+    val host = sharedHost
     val root = File(ApplicationProvider.getApplicationContext<Context>().cacheDir, "js-sandbox-${UUID.randomUUID()}").apply { mkdirs() }
-    val undeclared = File(root, "not-declared.txt")
-    val code = "await piWrite(${JSONObject.quote(undeclared.absolutePath)}, 'nope'); return 'never';"
-    val host = sandbox()
     try {
+      val undeclared = File(root, "not-declared.txt")
+      val code = "await piWrite(${JSONObject.quote(undeclared.absolutePath)}, 'nope'); return 'never';"
       val result = host.run("test-denied", code, JSONObject(), emptyList(), emptyList(), 10_000)
       assertEquals(false, result.optBoolean("ok"))
       assertTrue(result.optString("error").contains("not declared"))
       assertEquals(false, undeclared.exists())
     } finally {
-      host.close()
       root.deleteRecursively()
     }
   }
 
   @Test fun aCancelledRunReportsCancellation() {
-    val host = sandbox()
-    try {
-      val run = Thread {
-        host.run("test-cancel", "while (true) {}", JSONObject(), emptyList(), emptyList(), 5_000)
-      }
-      run.start()
-      Thread.sleep(1_000)
-      host.cancel("test-cancel")
-      run.join(5_000)
-      assertTrue("the cancelled run did not finish", !run.isAlive)
-    } finally {
-      host.close()
+    val host = sharedHost
+    val run = Thread {
+      host.run("test-cancel", "while (true) {}", JSONObject(), emptyList(), emptyList(), 5_000)
     }
+    run.start()
+    Thread.sleep(1_000)
+    host.cancel("test-cancel")
+    run.join(5_000)
+    assertTrue("the cancelled run did not finish", !run.isAlive)
   }
 
   @Test fun loadsWorkspaceModulesAsRealEsmWithRelativeImports() {
+    val host = sharedHost
     val root = File(ApplicationProvider.getApplicationContext<Context>().cacheDir, "js-sandbox-${UUID.randomUUID()}").apply { mkdirs() }
-    val helper = File(root, "sandbox-mod-helper.mjs").apply { writeText("export const double = value => value * 2;") }
-    val tools = File(root, "sandbox-mod-tools.mjs").apply {
-      writeText("import { double } from './sandbox-mod-helper.mjs';\nexport const quad = value => double(double(value));")
-    }
-    val host = sandbox()
     try {
+      val helper = File(root, "sandbox-mod-helper.mjs").apply { writeText("export const double = value => value * 2;") }
+      val tools = File(root, "sandbox-mod-tools.mjs").apply {
+        writeText("import { double } from './sandbox-mod-helper.mjs';\nexport const quad = value => double(double(value));")
+      }
       // Keyed by absolute path exactly the way NativeRuntimeHost hands the sources over, plus the
       // declared-as-written alias. Both must reach the same source — and whichever one the body
       // imports, the module's own relative import of the helper must resolve to a served sibling.
@@ -110,18 +116,17 @@ class JsSandboxHostDeviceTest {
       assertEquals(result.toString(), true, result.optBoolean("ok"))
       assertEquals("[8,12]", result.optJSONArray("result")?.toString())
     } finally {
-      host.close()
       root.deleteRecursively()
     }
   }
 
   @Test fun anUndeclaredModuleImportFailsTheRunWithAModuleName() {
+    val host = sharedHost
     val root = File(ApplicationProvider.getApplicationContext<Context>().cacheDir, "js-sandbox-${UUID.randomUUID()}").apply { mkdirs() }
-    val tools = File(root, "sandbox-mod-missing.mjs").apply {
-      writeText("import './sandbox-mod-absent.mjs';\nexport const x = 1;")
-    }
-    val host = sandbox()
     try {
+      val tools = File(root, "sandbox-mod-missing.mjs").apply {
+        writeText("import './sandbox-mod-absent.mjs';\nexport const x = 1;")
+      }
       val code = "return piModules[${JSONObject.quote(tools.absolutePath)}].x;"
       val result = host.run(
         "test-modules-missing", code, JSONObject(), emptyList(), emptyList(), 20_000,
@@ -131,29 +136,24 @@ class JsSandboxHostDeviceTest {
       assertTrue(result.optString("error").contains("Workspace module failed to load"))
       assertTrue(result.optString("error").contains(tools.absolutePath))
     } finally {
-      host.close()
       root.deleteRecursively()
     }
   }
 
   @Test fun importsAnEsmPackageFromTheCdnInsideTheWorker() {
-    val host = sandbox()
-    try {
-      val imports = JSONObject().put("pdf-lib", "https://esm.sh/pdf-lib@1.17.1")
-      val code = "return typeof piImports['pdf-lib'].PDFDocument;"
-      val result = host.run("test-import", code, imports, emptyList(), emptyList(), 20_000)
-      assertEquals(result.toString(), true, result.optBoolean("ok"))
-      assertEquals("function", result.optString("result"))
-    } finally {
-      host.close()
-    }
+    val host = sharedHost
+    val imports = JSONObject().put("pdf-lib", "https://esm.sh/pdf-lib@1.17.1")
+    val code = "return typeof piImports['pdf-lib'].PDFDocument;"
+    val result = host.run("test-import", code, imports, emptyList(), emptyList(), 20_000)
+    assertEquals(result.toString(), true, result.optBoolean("ok"))
+    assertEquals("function", result.optString("result"))
   }
 
   @Test fun createsAndReadsAPdfWithARealEsmPackage() {
+    val host = sharedHost
     val root = File(ApplicationProvider.getApplicationContext<Context>().cacheDir, "js-sandbox-${UUID.randomUUID()}").apply { mkdirs() }
-    val pdf = File(root, "created.pdf")
-    val host = sandbox()
     try {
+      val pdf = File(root, "created.pdf")
       val imports = JSONObject().put("pdf-lib", "https://esm.sh/pdf-lib@1.17.1")
       val create = """
         const { PDFDocument, StandardFonts } = piImports['pdf-lib'];
@@ -180,16 +180,15 @@ class JsSandboxHostDeviceTest {
       assertEquals(loaded.toString(), true, loaded.optBoolean("ok"))
       assertEquals(1, loaded.optInt("result"))
     } finally {
-      host.close()
       root.deleteRecursively()
     }
   }
 
   @Test fun extractsTextFromAPdfWithPdfJs() {
+    val host = sharedHost
     val root = File(ApplicationProvider.getApplicationContext<Context>().cacheDir, "js-sandbox-${UUID.randomUUID()}").apply { mkdirs() }
-    val pdf = File(root, "text.pdf")
-    val host = sandbox()
     try {
+      val pdf = File(root, "text.pdf")
       val pdfLib = JSONObject().put("pdf-lib", "https://esm.sh/pdf-lib@1.17.1")
       val create = """
         const { PDFDocument, StandardFonts } = piImports['pdf-lib'];
@@ -217,8 +216,59 @@ class JsSandboxHostDeviceTest {
       assertEquals(extracted.toString(), true, extracted.optBoolean("ok"))
       assertTrue(extracted.optString("result"), extracted.optString("result").contains("Hello Pi PDF"))
     } finally {
-      host.close()
       root.deleteRecursively()
     }
+  }
+
+  // The Pyodide tests come last on purpose: each run boots the interpreter, which is this suite's
+  // biggest memory consumer, so the heaviest work runs when everything else has already finished.
+
+  @Test fun pythonReadsDeclaredInputsAndWritesDeclaredOutputs() {
+    val host = sharedHost
+    val root = File(ApplicationProvider.getApplicationContext<Context>().cacheDir, "js-sandbox-${UUID.randomUUID()}").apply { mkdirs() }
+    try {
+      val input = File(root, "hello.txt").apply { writeText("hello") }
+      val output = File(root, "out.txt")
+      // One Pyodide boot covers the whole surface a JVM test cannot: the interpreter reports a
+      // JSON-safe result, print() becomes the run log, a declared input crosses as readable bytes,
+      // and piWrite writes through the same narrow bridge the JS body uses.
+      val code = """
+        def emphasise(text):
+            return text.upper()
+        print('pyboot')
+        text = piInputs[piInputPaths[0]].tobytes().decode()
+        await piWrite(piOutputs[0], emphasise(text).encode())
+        return {'len': len(text), 'sample': text + ' world'}
+      """.trimIndent()
+      val result = host.run(
+        "test-py-io", code, JSONArray(), listOf(input), listOf(output), 60_000,
+        kind = "py",
+        pyodideUrl = "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.mjs",
+        pyodideIndexUrl = "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/",
+      )
+      assertEquals("the Python run failed: $result", true, result.optBoolean("ok"))
+      assertEquals("{\"len\":5,\"sample\":\"hello world\"}", result.optString("result"))
+      assertTrue(result.optJSONArray("logs").toString().contains("pyboot"))
+      assertEquals("HELLO", output.readText())
+    } finally {
+      root.deleteRecursively()
+    }
+  }
+
+  @Test fun installsAPurePyPIPackageWithMicropip() {
+    val host = sharedHost
+    // six is the canonical pure wheel: tiny, PyPI-pinned, exactly what micropip is for. The
+    // version pin is what py_resolve would have handed py_run. The 180s ceiling is the whole
+    // budget Pyodide's first micropip run can take on this device: boot + interpreter + download.
+    val imports = JSONArray().put("six==1.16.0")
+    val code = "import six\nreturn six.__version__"
+    val result = host.run(
+      "test-py-six", code, imports, emptyList(), emptyList(), 180_000,
+      kind = "py",
+      pyodideUrl = "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.mjs",
+      pyodideIndexUrl = "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/",
+    )
+    assertEquals("the Python run failed: $result", true, result.optBoolean("ok"))
+    assertEquals("1.16.0", result.optString("result"))
   }
 }

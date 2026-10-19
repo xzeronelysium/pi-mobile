@@ -28,6 +28,7 @@ import { createFetchTools } from './fetch-tool.mjs';
 import { createAndroidShellTools } from './shell-tool.mjs';
 import { createJsTools } from './js-tools.mjs';
 import { createPyTools } from './py-tools.mjs';
+import { createSandboxInfo } from './sandbox-info.mjs';
 import { createRunScriptTools } from './run-script-tool.mjs';
 import { baseExtensions } from './skills.mjs';
 import { installProviders, updateProviderCatalog } from './providers.mjs';
@@ -105,6 +106,10 @@ export function createPiNative(bridge, options = {}) {
     call: bridge.call,
     workspaceRoot: () => state.workspaceRoot,
   }));
+  // The capability report, one read-only tool: what both sandboxes support and where their limits
+  // sit, assembled from the constants the tools enforce. The model reads it before choosing a
+  // package instead of discovering the limits through failures.
+  registry.install(createSandboxInfo());
   // The agent's own way to run a script it wrote. Android will not let an app process execute a file
   // in app storage (SELinux W^X since Android 10: `Permission denied`) and the workspace is mounted
   // `noexec`, so the agent's `./tool.sh` cannot work; `/system/bin/sh <script>` can, in both places,

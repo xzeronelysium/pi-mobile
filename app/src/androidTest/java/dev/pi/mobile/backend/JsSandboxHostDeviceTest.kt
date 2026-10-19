@@ -82,6 +82,20 @@ class JsSandboxHostDeviceTest {
     }
   }
 
+  @Test fun aStructuredJsFailureNamesThePhaseTypeAndUserLine() {
+    val host = sharedHost
+    // An error thrown at the body's first line: the generated wrapper adds exactly one line before
+    // it, so the deepest `at ` frame's line minus one is the user's line — the thing a JVM test
+    // cannot prove about Chromium's frames.
+    val result = host.run("test-js-err", "return missing.property;", JSONObject(), emptyList(), emptyList(), 10_000)
+    assertEquals(false, result.optBoolean("ok"))
+    assertEquals("execution", result.optString("phase"))
+    assertEquals("ReferenceError", result.optString("errorType"))
+    assertEquals(1, result.optInt("userLine"))
+    assertTrue(result.optString("message").contains("missing"))
+    assertTrue(result.optString("trace").contains("missing"))
+  }
+
   @Test fun aCancelledRunReportsCancellation() {
     val host = sharedHost
     val run = Thread {
@@ -144,7 +158,7 @@ class JsSandboxHostDeviceTest {
     val host = sharedHost
     val imports = JSONObject().put("pdf-lib", "https://esm.sh/pdf-lib@1.17.1")
     val code = "return typeof piImports['pdf-lib'].PDFDocument;"
-    val result = host.run("test-import", code, imports, emptyList(), emptyList(), 20_000)
+    val result = host.run("test-import", code, imports, emptyList(), emptyList(), 60_000)
     assertEquals(result.toString(), true, result.optBoolean("ok"))
     assertEquals("function", result.optString("result"))
   }
@@ -256,13 +270,12 @@ class JsSandboxHostDeviceTest {
   }
 
   @Test fun installsAPurePyPIPackageWithMicropip() {
-    val host = sharedHost
     // six is the canonical pure wheel: tiny, PyPI-pinned, exactly what micropip is for. The
     // version pin is what py_resolve would have handed py_run. The 180s ceiling is the whole
     // budget Pyodide's first micropip run can take on this device: boot + interpreter + download.
     val imports = JSONArray().put("six==1.16.0")
     val code = "import six\nreturn six.__version__"
-    val result = host.run(
+    val result = sharedHost.run(
       "test-py-six", code, imports, emptyList(), emptyList(), 180_000,
       kind = "py",
       pyodideUrl = "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.mjs",
@@ -270,5 +283,22 @@ class JsSandboxHostDeviceTest {
     )
     assertEquals("the Python run failed: $result", true, result.optBoolean("ok"))
     assertEquals("1.16.0", result.optString("result"))
+  }
+
+  @Test fun aStructuredPyFailureNamesThePhaseTypeAndUserLine() {
+    // Third and last Pyodide boot of the suite: the traceback must lose both wrapper lines and
+    // report the honest user line, with the full trace still available beside it.
+    val result = sharedHost.run(
+      "test-py-err", "x = 1\nraise ValueError('user diagnostic')", JSONArray(), emptyList(), emptyList(), 90_000,
+      kind = "py",
+      pyodideUrl = "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/pyodide.mjs",
+      pyodideIndexUrl = "https://cdn.jsdelivr.net/pyodide/v0.26.2/full/",
+    )
+    assertEquals(false, result.optBoolean("ok"))
+    assertEquals("execution", result.optString("phase"))
+    assertEquals("ValueError", result.optString("errorType"))
+    assertEquals(2, result.optInt("userLine"))
+    assertEquals("the Python message should name the raise", "user diagnostic", result.optString("message"))
+    assertTrue("the full trace stays in the report", result.optString("trace").contains("ValueError"))
   }
 }

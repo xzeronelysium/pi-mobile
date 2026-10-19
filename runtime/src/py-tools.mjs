@@ -11,6 +11,8 @@
 
 import { defineExtension, defineTool } from '@earendil-works/pi-durable';
 import { resolve as resolvePath } from './path.mjs';
+import { outputRecords, renderOutputBlock } from './sandbox-shared.mjs';
+import { SANDBOX_CAPABILITIES_TOOL_NAME } from './sandbox-info.mjs';
 
 export const PY_RESOLVE_TOOL_NAME = 'py_resolve';
 export const PY_RUN_TOOL_NAME = 'py_run';
@@ -133,6 +135,12 @@ export function createPyTools({ transport, call, workspaceRoot } = {}) {
     if (typeof name !== 'string' || name.trim() === '') {
       throw new PyToolError('invalid_name', 'name is required');
     }
+    // A plain name stands on the lockfile first, exactly like the JS flow: the last good run's pin
+    // is reusable without a network round trip; an explicit version goes to PyPI.
+    if (version === undefined || version === '') {
+      const locked = await lockedPackage(name.trim());
+      if (locked !== null) return locked;
+    }
     const doc = await pypiDoc(getJson, name.trim(), timeoutMs);
     const chosen = version === undefined || version === '' ? doc?.info?.version : String(version);
     let versioned = doc?.urls ?? [];
@@ -154,7 +162,39 @@ export function createPyTools({ transport, call, workspaceRoot } = {}) {
     };
   }
 
-  async function writeLock(resolved, context) {
+  /**
+   * The `.pi-py/lock.json` entry for one plain name, as a resolver result: the same fields the
+   * PyPI document path fills, with whatever the last good lock recorded. Integrity is carried
+   * as recorded; strict re-verification of an installed wheel is the warm-cache follow-up.
+   */
+  async function lockedPackage(name) {
+    const path = resolveInsideWorkspace(rootOf(), PY_LOCK_PATH);
+    try {
+      const raw = await call('file.read', { path });
+      const entry = JSON.parse(raw)?.packages?.[name];
+      if (entry && typeof entry.version === 'string' && typeof entry.resolved === 'string') {
+        return {
+          name: typeof entry.name === 'string' ? entry.name : name,
+          version: entry.version,
+          summary: null,
+          license: entry.license ?? null,
+          homepage: null,
+          requiresPython: null,
+          resolved: entry.resolved,
+          filename: null,
+          bytes: null,
+          sha256: entry.integrity ?? null,
+          url: null,
+          pure: entry.pure ?? null,
+          warnings: entry.pure === false ? ['pinned impure wheel from the lockfile'] : [],
+          reused: true,
+        };
+      }
+    } catch { /* no lock, or an unreadable one: resolve from PyPI as usual */ }
+    return null;
+  }
+
+  async function writeLock(resolved, runtime, context) {
     const path = resolveInsideWorkspace(rootOf(), PY_LOCK_PATH);
     let existing = {};
     try {
@@ -172,10 +212,14 @@ export function createPyTools({ transport, call, workspaceRoot } = {}) {
         pure: entry.pure,
       };
     }
+    // The runtime beside the dependencies: which interpreter produced this lock, and the WebView
+    // it ran on (whenever the report carried one).
+    const runtimeEntries = { pyodide: PYODIDE_VERSION, ...(runtime?.webview ? { webview: runtime.webview } : {}) };
     const value = {
       version: 1,
       updatedAt: new Date().toISOString(),
       packages,
+      runtime: { ...(existing.runtime ?? {}), ...runtimeEntries },
     };
     try {
       await call('file.write', { path, text: `${JSON.stringify(value, null, 2)}\n` });
@@ -232,7 +276,10 @@ export function createPyTools({ transport, call, workspaceRoot } = {}) {
       + `PyPI — pure-Python wheels only; numpy, pandas, pillow and the like ship inside Pyodide itself. `
       + `The body is indented function code dedented automatically and runs inside \`async def __pi_main__():\`, `
       + `so await and return both work and the return value must be JSON-safe (use .dumps if in doubt). `
-      + `A successful run pins every resolved package into .pi-py/lock.json. Known-good packages: pypdf, `
+      + `A successful run pins every resolved package into .pi-py/lock.json; a plain package name `
+      + `reuses that lock's last-good pin with no network round trip, and the interpreter plus the `
+      + `WebView version are recorded beside the packages. Read ${SANDBOX_CAPABILITIES_TOOL_NAME} `
+      + `when unsure what this sandbox supports. Known-good packages: pypdf, `
       + `pdfminer.six, python-docx, openpyxl, pytz, six.`,
     parameters: {
       type: 'object',
@@ -298,17 +345,47 @@ export function createPyTools({ transport, call, workspaceRoot } = {}) {
 
       if (value?.cancelled === true || signal?.aborted === true) throw abortError('The Python run was aborted');
       if (value?.timedOut === true) throw new PyToolError('timeout', `The Python run timed out after ${timeoutMs} ms`);
+      const verifiedOutputs = outputRecords(value);
+      // A sandbox failure is a structured report, not a refusal to render — same contract as the
+      // JS tool: phase, type and the proven user-code line in the result text; the full traceback
+      // rides in the details.
       if (value?.ok !== true) {
-        throw new PyToolError('sandbox_error', textOf(value?.error) || 'The Python sandbox failed without an error');
+        const phase = textOf(value?.phase) || 'execution';
+        const errorType = textOf(value?.errorType) || 'Error';
+        const userLine = Number.isInteger(value?.userLine) ? value.userLine : null;
+        const whereClause = userLine !== null ? ` at user-code line ${userLine}` : '';
+        const trace = textOf(value?.trace);
+        const traceBlock = trace === '' ? '' : `\n[trace]\n${truncate(trace, 4_000)}`;
+        const message = textOf(value?.message) || textOf(value?.error) || 'No message was reported.';
+        return {
+          content: [{
+            type: 'text',
+            text: truncate(
+              `The Python run failed in the ${phase} phase: ${errorType}${whereClause}. ${message}` + traceBlock,
+            ),
+          }],
+          details: {
+            phase,
+            errorType,
+            userLine,
+            message,
+            trace: value?.trace ?? null,
+            inputs: inputPaths,
+            outputs: verifiedOutputs,
+            logs: Array.isArray(value?.logs) ? value.logs.map(entry => String(entry)).slice(0, 200) : [],
+          },
+        };
       }
 
-      const lockPath = await writeLock(resolved, { api });
+      const webview = textOf(value?.webview) || null;
+      const lockPath = await writeLock(resolved, { webview }, { api });
       const logs = Array.isArray(value.logs) ? value.logs.map(entry => String(entry)).slice(0, 200) : [];
       const resultText = value.result === undefined ? '' : truncate(safeText(value.result));
       const blocks = [];
+      const outputBlock = renderOutputBlock(verifiedOutputs);
+      if (outputBlock !== null) blocks.push(outputBlock);
       if (logs.length > 0) blocks.push(`[logs]\n${truncate(logs.join('\n'))}`);
       if (resultText !== '' && resultText !== 'null') blocks.push(`[result]\n${resultText}`);
-      if (Array.isArray(value.outputs) && value.outputs.length > 0) blocks.push(`[outputs]\n${value.outputs.join('\n')}`);
       if (blocks.length === 0) blocks.push('The Python run completed without a result.');
       if (lockPath !== null) blocks.push(`[lock]\n${lockPath}`);
 
@@ -322,9 +399,10 @@ export function createPyTools({ transport, call, workspaceRoot } = {}) {
             resolved: entry.resolved,
             integrity: entry.sha256,
             pure: entry.pure,
+            reused: entry.reused === true,
           })),
           inputs: inputPaths,
-          outputs: outputPaths,
+          outputs: verifiedOutputs,
           logs,
           result: resultText,
           lockPath,

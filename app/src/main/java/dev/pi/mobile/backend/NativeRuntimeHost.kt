@@ -437,11 +437,7 @@ class NativeRuntimeHost(
       val modules = moduleSources(args.optJSONArray("modules"))
       val aliases = moduleAliases(args.optJSONArray("moduleAliases"), modules)
       val report = sandbox.run(requestId, code, imports, files("inputs"), files("outputs"), timeoutMs, modules, aliases)
-      // Only a successful run earns lockfile entries: a cancelled or timed-out run says nothing
-      // about which module content was last good.
-      if (report.optBoolean("ok") && modules.isNotEmpty()) {
-        report.put("modules", moduleMetadata(modules))
-      }
+      finalizeSandboxReport(report, modules)
       report
     }
     "py.run" -> {
@@ -464,13 +460,15 @@ class NativeRuntimeHost(
         }
       }
       val timeoutMs = args.optLong("timeoutMs", 120_000L).coerceIn(1L, 180_000L)
-      sandbox.run(
+      val report = sandbox.run(
         requestId, code,
         imports, files("inputs"), files("outputs"), timeoutMs,
         kind = "py",
         pyodideUrl = pyodide?.optString("url") ?: "",
         pyodideIndexUrl = pyodide?.optString("indexUrl") ?: "",
       )
+      finalizeSandboxReport(report)
+      report
     }
     "py.cancel" -> { sandbox.cancel(args.getString("requestId")); null }
     "js.cancel" -> { sandbox.cancel(args.getString("requestId")); null }
@@ -572,6 +570,53 @@ class NativeRuntimeHost(
       rewritten.put("destination", destination.path)
     }
     return io.files(routed.root).dispatch(operation, rewritten)
+  }
+
+  /**
+   * Everything the two run ops do to a sandbox report after the worker has spoken, in one place so
+   * the JS and Python contracts stay identical.
+   *
+   * On a successful run: the worker's output file names are verified against the file system and
+   * become records — path, byte size, SHA-256 — so the reply carries what the disk actually holds
+   * rather than what the run believes it wrote; module hashes join them for the lockfile. Any run:
+   * the WebView version travels with the report so the lockfile can record the runtime beside the
+   * dependency versions.
+   */
+  private fun finalizeSandboxReport(report: JSONObject, modules: Map<String, String> = emptyMap()) {
+    webViewVersion()?.let { version -> report.put("webview", version) }
+    if (report.optBoolean("ok")) {
+      val reported = report.optJSONArray("outputs") ?: JSONArray()
+      val verified = JSONArray()
+      for (index in 0 until reported.length()) {
+        val declared = reported.optString(index)
+        val routed = io.confine(declared)
+        val file = File(routed.root, routed.path)
+        val entry = JSONObject()
+          .put("path", file.absolutePath)
+          .put("bytes", if (file.isFile) file.length() else JSONObject.NULL)
+        if (file.isFile) {
+          entry.put(
+            "sha256",
+            MessageDigest.getInstance("SHA-256")
+              .digest(file.readBytes())
+              .joinToString("") { "%02x".format(it) },
+          )
+        }
+        verified.put(entry)
+      }
+      report.put("outputs", verified)
+      // Only a successful run earns lockfile entries: a cancelled or timed-out run says nothing
+      // about which module content was last good.
+      if (modules.isNotEmpty()) report.put("modules", moduleMetadata(modules))
+    }
+  }
+
+  /** The system WebView the sandbox actually runs on, for the lockfile's runtime record. */
+  private fun webViewVersion(): String? = listOf("com.google.android.webview", "com.android.webview").firstNotNullOfOrNull { pkg ->
+    runCatching {
+      val info = context.packageManager.getPackageInfo(pkg, 0)
+      info.versionName?.takeIf { it.isNotBlank() }
+    }.getOrNull()
   }
 
   /**

@@ -70711,11 +70711,413 @@ ${command}` : command,
 
   // src/js-tools.mjs
   init_buffer();
-  var JS_SEARCH_TOOL_NAME = "js_search", JS_INFO_TOOL_NAME = "js_info", JS_RESOLVE_TOOL_NAME = "js_resolve", JS_RUN_TOOL_NAME = "js_run", JS_EXTENSION_NAME = "js-sandbox", NPM_REGISTRY = "https://registry.npmjs.org", NPM_SEARCH = "https://registry.npmjs.org/-/v1/search", JSDELIVR_CDN = "https://cdn.jsdelivr.net/npm", ESM_SH = "https://esm.sh", UNPKG = "https://unpkg.com", CDNJS_API = "https://api.cdnjs.com/libraries", JS_LOCK_PATH = ".pi-js/lock.json", MAX_CODE_BYTES = 256 * 1024, MAX_RESULT_BYTES = 256 * 1024, MAX_IMPORTS = 12, MAX_FILES = 20, MAX_MODULES = 12, DEFAULT_RUN_TIMEOUT_MS = 6e4, MAX_RUN_TIMEOUT_MS = 18e4, JsToolError = class extends Error {
+
+  // src/sandbox-shared.mjs
+  init_buffer();
+  function outputRecords(value) {
+    return (Array.isArray(value?.outputs) ? value.outputs : []).filter((entry) => entry !== null && typeof entry == "object");
+  }
+  function renderOutputBlock(records) {
+    return records.length === 0 ? null : `[outputs]
+` + records.map(
+      (entry) => `${entry.path}  ${Number.isFinite(entry.bytes) ? `${entry.bytes} bytes` : "size unknown"}  sha256:${typeof entry.sha256 == "string" ? entry.sha256.slice(0, 16) : "\u2014"}`
+    ).join(`
+`);
+  }
+
+  // src/sandbox-info.mjs
+  init_buffer();
+
+  // src/py-tools.mjs
+  init_buffer();
+  var PY_RESOLVE_TOOL_NAME = "py_resolve", PY_RUN_TOOL_NAME = "py_run", PY_EXTENSION_NAME = "py-sandbox", PYPI_JSON = "https://pypi.org/pypi", PYODIDE_VERSION = "0.26.2", PYODIDE_CDN = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full`, PY_LOCK_PATH = ".pi-py/lock.json", MAX_PY_CODE_BYTES = 256 * 1024, MAX_PY_IMPORTS = 12, MAX_FILES = 20, DEFAULT_RUN_TIMEOUT_MS = 12e4, MAX_RUN_TIMEOUT_MS = 18e4, PyToolError = class extends Error {
+    constructor(code, message3, cause) {
+      super(message3), this.name = "PyToolError", this.code = code, cause !== void 0 && (this.cause = cause);
+    }
+  }, abortError5 = (message3) => typeof DOMException == "function" ? new DOMException(message3, "AbortError") : Object.assign(new Error(message3), { name: "AbortError" }), textOf = (value) => typeof value == "string" ? value : "", truncate2 = (text3, limit3 = 256 * 1024) => text3.length > limit3 ? `${text3.slice(0, limit3)}
+\u2026[truncated at ${limit3} characters]\u2026` : text3;
+  function resolveInsideWorkspace(root, target) {
+    let base = typeof root == "string" && root !== "" ? root : "/", path4 = resolve2(base, String(target));
+    if (!(base === "/" || path4 === base || path4.startsWith(`${base}/`))) throw new PyToolError("workspace_escape", `${target} is outside the workspace (${base})`);
+    return path4;
+  }
+  function createHttp(transport4) {
+    if (typeof transport4 != "function") throw new TypeError("createPyTools requires the runtime transport");
+    return async function(url, timeoutMs = 15e3) {
+      let response;
+      try {
+        response = await transport4(url, {
+          method: "GET",
+          headers: { accept: "application/json" },
+          timeoutMs
+        });
+      } catch (error) {
+        throw new PyToolError("network_error", `Could not reach ${url}: ${error?.message ?? String(error)}`, error);
+      }
+      let body = await response.text();
+      if (!response.ok) {
+        let code = response.status === 404 ? "not_found" : "http_status";
+        throw new PyToolError(code, `${url} answered HTTP ${response.status}${body ? `: ${truncate2(body, 400)}` : ""}`);
+      }
+      try {
+        return JSON.parse(body);
+      } catch (error) {
+        throw new PyToolError("invalid_response", `${url} did not return JSON`, error);
+      }
+    };
+  }
+  function chooseFile(entries) {
+    let files = (Array.isArray(entries) ? entries : []).filter((entry) => typeof entry?.filename == "string"), pure = files.find((entry) => /py3-none-any\.whl$/i.test(entry.filename)) ?? files.find((entry) => /py2\.py3-none-any\.whl$/i.test(entry.filename));
+    if (pure !== void 0) return { file: pure, pure: !0, warnings: [] };
+    let platform = files.find((entry) => entry.filename.endsWith(".whl"));
+    if (platform !== void 0)
+      return { file: platform, pure: !1, warnings: [`non-pure wheel: ${platform.filename} will not install in the sandbox`] };
+    let sdist = files.find((entry) => entry.filename.endsWith(".tar.gz")) ?? files[0];
+    return sdist !== void 0 ? { file: sdist, pure: !1, warnings: [`no wheel for this version: ${sdist.filename} cannot install in the sandbox`] } : null;
+  }
+  async function pypiDoc(getJson, name, timeoutMs) {
+    return getJson(`${PYPI_JSON}/${name}/json`, timeoutMs);
+  }
+  function packageSummary(doc, chosenVersion, warn) {
+    let info = doc?.info ?? {};
+    return {
+      name: textOf(info.name),
+      version: chosenVersion,
+      summary: textOf(info.summary),
+      license: textOf(info.license) || null,
+      homepage: textOf(info.home_page) || textOf(info.project_urls?.Homepage) || null,
+      requiresPython: textOf(info.requires_python) || null,
+      ...warn ?? { pure: null, warnings: [] }
+    };
+  }
+  function createPyTools({ transport: transport4, call, workspaceRoot } = {}) {
+    if (typeof call != "function") throw new TypeError("createPyTools requires the bridge call");
+    let getJson = createHttp(transport4), rootOf = typeof workspaceRoot == "function" ? workspaceRoot : () => typeof workspaceRoot == "string" ? workspaceRoot : "/", nextRun = 0;
+    async function resolvePackage(name, version, timeoutMs) {
+      if (typeof name != "string" || name.trim() === "")
+        throw new PyToolError("invalid_name", "name is required");
+      if (version === void 0 || version === "") {
+        let locked = await lockedPackage(name.trim());
+        if (locked !== null) return locked;
+      }
+      let doc = await pypiDoc(getJson, name.trim(), timeoutMs), chosen = version === void 0 || version === "" ? doc?.info?.version : String(version), versioned = doc?.urls ?? [];
+      if ((doc?.info?.version ?? "") !== chosen) {
+        if (!doc?.releases?.[chosen]) throw new PyToolError("version_not_found", `${name} has no version ${chosen}`);
+        versioned = doc.releases[chosen];
+      }
+      let pick = chooseFile(versioned);
+      if (pick === null) throw new PyToolError("no_files", `${name} ${chosen} has no installable file entry`);
+      return {
+        ...packageSummary(doc, chosen),
+        resolved: `${name.trim()}==${chosen}`,
+        filename: pick.file.filename,
+        bytes: Number.isFinite(pick.file.size) ? pick.file.size : null,
+        sha256: typeof pick.file.digests?.sha256 == "string" ? pick.file.digests.sha256 : null,
+        url: pick.file.url,
+        pure: pick.pure,
+        warnings: pick.warnings
+      };
+    }
+    async function lockedPackage(name) {
+      let path4 = resolveInsideWorkspace(rootOf(), PY_LOCK_PATH);
+      try {
+        let raw = await call("file.read", { path: path4 }), entry = JSON.parse(raw)?.packages?.[name];
+        if (entry && typeof entry.version == "string" && typeof entry.resolved == "string")
+          return {
+            name: typeof entry.name == "string" ? entry.name : name,
+            version: entry.version,
+            summary: null,
+            license: entry.license ?? null,
+            homepage: null,
+            requiresPython: null,
+            resolved: entry.resolved,
+            filename: null,
+            bytes: null,
+            sha256: entry.integrity ?? null,
+            url: null,
+            pure: entry.pure ?? null,
+            warnings: entry.pure === !1 ? ["pinned impure wheel from the lockfile"] : [],
+            reused: !0
+          };
+      } catch {
+      }
+      return null;
+    }
+    async function writeLock(resolved, runtime, context2) {
+      let path4 = resolveInsideWorkspace(rootOf(), PY_LOCK_PATH), existing = {};
+      try {
+        let raw = await call("file.read", { path: path4 });
+        typeof raw == "string" && raw.trim() !== "" && (existing = JSON.parse(raw));
+      } catch {
+      }
+      let packages = { ...existing.packages ?? {} };
+      for (let entry of resolved)
+        packages[entry.name] = {
+          name: entry.name,
+          version: entry.version,
+          source: entry.source,
+          resolved: entry.resolved,
+          integrity: entry.sha256,
+          pure: entry.pure
+        };
+      let runtimeEntries = { pyodide: PYODIDE_VERSION, ...runtime?.webview ? { webview: runtime.webview } : {} }, value = {
+        version: 1,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        packages,
+        runtime: { ...existing.runtime ?? {}, ...runtimeEntries }
+      };
+      try {
+        return await call("file.write", { path: path4, text: `${JSON.stringify(value, null, 2)}
+` }), path4;
+      } catch (error) {
+        return context2?.api?.diagnostic?.({
+          severity: "warn",
+          code: "lock_write_failed",
+          message: `The Python lockfile could not be written: ${error?.message ?? String(error)}`
+        }), null;
+      }
+    }
+    let resolveTool = {
+      name: PY_RESOLVE_TOOL_NAME,
+      description: `Resolve a PyPI package name to an exact version, the wheel a pure-Python install would use, its SHA-256 and a purity verdict. This is also the metadata lookup (there is no PyPI search endpoint; discovery is your own knowledge): ${PY_RUN_TOOL_NAME} pins what this returns, reaching it as the resolved package inside the Pyodide interpreter.`,
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: 'Package name, e.g. "pypdf".' },
+          version: { type: "string", description: "Exact version. Omit for latest. Ranges are not supported by design." },
+          timeoutMs: { type: "integer", description: "Abort the metadata request after this many milliseconds." }
+        },
+        required: ["name"],
+        additionalProperties: !1
+      },
+      async execute(args, api) {
+        let info = await resolvePackage(args?.name, args?.version, args?.timeoutMs), blocks = [JSON.stringify(info, null, 2)];
+        return info.pure !== !0 && blocks.push(`\u26A0 ${info.warnings.join("; ")}`), api?.diagnostic?.({
+          severity: info.pure === !0 ? "info" : "warn",
+          code: "py_purity",
+          message: `${info.name} ${info.version}: ${info.pure === !0 ? "pure wheel" : info.warnings.join("; ")}`
+        }), {
+          content: [{ type: "text", text: truncate2(blocks.join(`
+
+`)) }],
+          details: info
+        };
+      }
+    }, runTool = {
+      name: PY_RUN_TOOL_NAME,
+      description: `Run Python in the isolated sandbox on Pyodide (CPython compiled to WebAssembly). The sandbox has no app bridge: it exposes piInputs (declared input files as memoryview, keyed by absolute path \u2014 use .tobytes().decode() for text), piInputPaths (those absolute paths as a list), piWrite(path, bytes) for declared output files, piOutputs (those absolute paths as a list), and print/stdout (which becomes the run's log). Declared packages are installed with micropip from PyPI \u2014 pure-Python wheels only; numpy, pandas, pillow and the like ship inside Pyodide itself. The body is indented function code dedented automatically and runs inside \`async def __pi_main__():\`, so await and return both work and the return value must be JSON-safe (use .dumps if in doubt). A successful run pins every resolved package into .pi-py/lock.json; a plain package name reuses that lock's last-good pin with no network round trip, and the interpreter plus the WebView version are recorded beside the packages. Read ${SANDBOX_CAPABILITIES_TOOL_NAME} when unsure what this sandbox supports. Known-good packages: pypdf, pdfminer.six, python-docx, openpyxl, pytz, six.`,
+      parameters: {
+        type: "object",
+        properties: {
+          code: { type: "string", description: "Python body. Use piInputs, piInputPaths, piWrite, piOutputs, print. return the result." },
+          imports: {
+            type: "array",
+            items: { type: "string" },
+            description: "PyPI package names to resolve to an exact version and install with micropip."
+          },
+          inputs: { type: "array", items: { type: "string" }, description: "Workspace files to expose in piInputs." },
+          outputs: { type: "array", items: { type: "string" }, description: "Workspace files piWrite may create." },
+          timeoutMs: { type: "integer", description: "Kill the sandbox after this many milliseconds. Default 120000; max 180000." }
+        },
+        required: ["code"],
+        additionalProperties: !1
+      },
+      async execute(args, api, context2) {
+        let code = args?.code;
+        if (typeof code != "string" || code.trim() === "") throw new PyToolError("invalid_code", "code is required");
+        if (new TextEncoder().encode(code).length > MAX_PY_CODE_BYTES)
+          throw new PyToolError("code_too_large", `code exceeds ${MAX_PY_CODE_BYTES} bytes`);
+        let imports = stringArray(args?.imports, "imports", MAX_PY_IMPORTS), inputs = stringArray(args?.inputs, "inputs", MAX_FILES), outputs = stringArray(args?.outputs, "outputs", MAX_FILES), root = rootOf(), inputPaths = inputs.map((path4) => resolveInsideWorkspace(root, path4)), outputPaths = outputs.map((path4) => resolveInsideWorkspace(root, path4)), timeoutMs = args?.timeoutMs === void 0 ? DEFAULT_RUN_TIMEOUT_MS : Math.min(Math.max(Number(args.timeoutMs), 1), MAX_RUN_TIMEOUT_MS), resolved = [];
+        for (let name of imports)
+          resolved.push(await resolvePackage(name, void 0, void 0));
+        let requestId3 = `py-run-${++nextRun}`, signal = context2?.abortSignal;
+        if (signal?.aborted === !0) throw abortError5("The Python run was aborted before it started");
+        let onAbort = () => {
+          call("py.cancel", { requestId: requestId3 }).catch(() => {
+          });
+        };
+        typeof signal?.addEventListener == "function" && signal.addEventListener("abort", onAbort, { once: !0 });
+        let value;
+        try {
+          value = await call("py.run", {
+            code,
+            imports: resolved.map((entry) => entry.resolved),
+            pyodide: { url: `${PYODIDE_CDN}/pyodide.mjs`, indexUrl: `${PYODIDE_CDN}/` },
+            inputs: inputPaths,
+            outputs: outputPaths,
+            timeoutMs,
+            requestId: requestId3
+          });
+        } catch (error) {
+          throw signal?.aborted === !0 ? abortError5("The Python run was aborted") : new PyToolError("sandbox_error", `The Python sandbox refused the run: ${error?.message ?? String(error)}`, error);
+        } finally {
+          typeof signal?.removeEventListener == "function" && signal.removeEventListener("abort", onAbort);
+        }
+        if (value?.cancelled === !0 || signal?.aborted === !0) throw abortError5("The Python run was aborted");
+        if (value?.timedOut === !0) throw new PyToolError("timeout", `The Python run timed out after ${timeoutMs} ms`);
+        let verifiedOutputs = outputRecords(value);
+        if (value?.ok !== !0) {
+          let phase = textOf(value?.phase) || "execution", errorType = textOf(value?.errorType) || "Error", userLine = Number.isInteger(value?.userLine) ? value.userLine : null, whereClause = userLine !== null ? ` at user-code line ${userLine}` : "", trace = textOf(value?.trace), traceBlock = trace === "" ? "" : `
+[trace]
+${truncate2(trace, 4e3)}`, message3 = textOf(value?.message) || textOf(value?.error) || "No message was reported.";
+          return {
+            content: [{
+              type: "text",
+              text: truncate2(
+                `The Python run failed in the ${phase} phase: ${errorType}${whereClause}. ${message3}` + traceBlock
+              )
+            }],
+            details: {
+              phase,
+              errorType,
+              userLine,
+              message: message3,
+              trace: value?.trace ?? null,
+              inputs: inputPaths,
+              outputs: verifiedOutputs,
+              logs: Array.isArray(value?.logs) ? value.logs.map((entry) => String(entry)).slice(0, 200) : []
+            }
+          };
+        }
+        let webview = textOf(value?.webview) || null, lockPath = await writeLock(resolved, { webview }, { api }), logs = Array.isArray(value.logs) ? value.logs.map((entry) => String(entry)).slice(0, 200) : [], resultText = value.result === void 0 ? "" : truncate2(safeText(value.result)), blocks = [], outputBlock = renderOutputBlock(verifiedOutputs);
+        return outputBlock !== null && blocks.push(outputBlock), logs.length > 0 && blocks.push(`[logs]
+${truncate2(logs.join(`
+`))}`), resultText !== "" && resultText !== "null" && blocks.push(`[result]
+${resultText}`), blocks.length === 0 && blocks.push("The Python run completed without a result."), lockPath !== null && blocks.push(`[lock]
+${lockPath}`), {
+          content: [{ type: "text", text: blocks.join(`
+
+`) }],
+          details: {
+            imports: resolved.map((entry) => ({
+              name: entry.name,
+              version: entry.version,
+              source: entry.source,
+              resolved: entry.resolved,
+              integrity: entry.sha256,
+              pure: entry.pure,
+              reused: entry.reused === !0
+            })),
+            inputs: inputPaths,
+            outputs: verifiedOutputs,
+            logs,
+            result: resultText,
+            lockPath
+          }
+        };
+      }
+    };
+    return {
+      name: PY_EXTENSION_NAME,
+      tools: [resolveTool, runTool]
+    };
+  }
+  function safeText(result) {
+    if (result === void 0) return "";
+    if (typeof result == "string")
+      try {
+        return JSON.stringify(JSON.parse(result));
+      } catch {
+        return result;
+      }
+    try {
+      return JSON.stringify(result);
+    } catch {
+      return String(result);
+    }
+  }
+  function stringArray(value, field, max) {
+    if (value == null) return [];
+    if (!Array.isArray(value)) throw new PyToolError("invalid_arguments", `${field} must be an array`);
+    if (value.length > max) throw new PyToolError("invalid_arguments", `${field} may hold at most ${max} entries`);
+    return value.map((entry) => {
+      if (typeof entry != "string" || entry.trim() === "") throw new PyToolError("invalid_arguments", `${field} entries must be non-empty strings`);
+      return entry.trim();
+    });
+  }
+
+  // src/sandbox-info.mjs
+  var SANDBOX_CAPABILITIES_TOOL_NAME = "sandbox_capabilities", SANDBOX_INFO_EXTENSION_NAME = "sandbox-info", SANDBOX_EGRESS_HOSTS = [
+    "esm.sh",
+    "cdn.jsdelivr.net",
+    "unpkg.com",
+    "cdnjs.cloudflare.com",
+    "tessdata.projectnaptha.com",
+    "pypi.org",
+    "files.pythonhosted.org"
+  ];
+  function sandboxCapabilities() {
+    return {
+      javascript: {
+        engine: "Chromium (the Android System WebView) JavaScript, in the isolated Worker",
+        realEsm: !0,
+        nodeBuiltIns: [],
+        providedGlobals: ["console", "TextEncoder", "TextDecoder", "atob", "btoa"],
+        note: "There is no Node.js runtime, no Buffer, and no fs/process. Browser-compatible ESM packages from the CDNs work; anything needing Node built-ins or native binaries will not."
+      },
+      python: {
+        interpreter: `CPython on Pyodide v${PYODIDE_VERSION}`,
+        nativeExtensionSupport: !1,
+        pureWheelsOnly: !0,
+        bundledWithInterpreter: ["micropip", "numpy", "pandas", "pillow", "and the Python stdlib"],
+        note: "Pure-Python wheels install from PyPI via micropip. C-extension wheels that are not prebuilt for Pyodide cannot install \u2014 prebuilt editions (numpy, pandas, pillow, ...) come from the pinned interpreter distribution instead."
+      },
+      limits: {
+        jsCodeBytes: MAX_CODE_BYTES,
+        pythonCodeBytes: MAX_PY_CODE_BYTES,
+        inputFileBytes: 33554432,
+        outputFileBytes: 33554432,
+        resultAndLogBytes: 262144,
+        importsPerRun: Math.max(MAX_IMPORTS, MAX_PY_IMPORTS),
+        declaredFilesPerRun: MAX_FILES2,
+        workspaceModulesPerRun: MAX_MODULES,
+        jsTimeout: { defaultMs: DEFAULT_RUN_TIMEOUT_MS2, maxMs: MAX_RUN_TIMEOUT_MS2 },
+        pythonTimeout: { defaultMs: 12e4, maxMs: 18e4 },
+        memory: "device-dependent; runs are terminated on their own deadline, not a fixed heap",
+        filesystem: "only the declared input/output paths, confined to the workspace; no shell, no Android bridge, no app storage",
+        pyodideColdStart: "each Python run boots the interpreter fresh (multi-second); there is no persistent session by design"
+      },
+      network: {
+        sandboxEgressAllowlist: SANDBOX_EGRESS_HOSTS,
+        note: "Sandbox code reaches only the allowlisted hosts. Package resolution and downloads run in the tool layer and the worker respectively; anything else is refused."
+      },
+      reproducibility: {
+        lockfiles: [JS_LOCK_PATH, PY_LOCK_PATH],
+        reuse: "a plain package name resolves from the last good lock with no network round trip; an explicit version bypasses the lock",
+        moduleHashes: "workspace modules are SHA-256 recorded after each successful run",
+        offline: "locked runs avoid resolution traffic; first-time packages and Pyodide itself need the network"
+      }
+    };
+  }
+  function createSandboxInfo() {
+    let capabilitiesTool = {
+      name: SANDBOX_CAPABILITIES_TOOL_NAME,
+      description: "Read the sandbox capability report before choosing packages for a run: what the JS and Python (Pyodide) runtimes support, their size/timeout/memory limits, the network allowlist and lockfile behavior. Use this to rule requests in or out \u2014 not to discover limitations by failure.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: !1
+      },
+      execute() {
+        let report = sandboxCapabilities();
+        return {
+          content: [{ type: "text", text: JSON.stringify(report, null, 2) }],
+          details: report
+        };
+      }
+    };
+    return {
+      name: SANDBOX_INFO_EXTENSION_NAME,
+      tools: [capabilitiesTool]
+    };
+  }
+
+  // src/js-tools.mjs
+  var JS_SEARCH_TOOL_NAME = "js_search", JS_INFO_TOOL_NAME = "js_info", JS_RESOLVE_TOOL_NAME = "js_resolve", JS_RUN_TOOL_NAME = "js_run", JS_EXTENSION_NAME = "js-sandbox", NPM_REGISTRY = "https://registry.npmjs.org", NPM_SEARCH = "https://registry.npmjs.org/-/v1/search", JSDELIVR_CDN = "https://cdn.jsdelivr.net/npm", ESM_SH = "https://esm.sh", UNPKG = "https://unpkg.com", CDNJS_API = "https://api.cdnjs.com/libraries", JS_LOCK_PATH = ".pi-js/lock.json", MAX_CODE_BYTES = 256 * 1024, MAX_RESULT_BYTES = 256 * 1024, MAX_IMPORTS = 12, MAX_FILES2 = 20, MAX_MODULES = 12, DEFAULT_RUN_TIMEOUT_MS2 = 6e4, MAX_RUN_TIMEOUT_MS2 = 18e4, JsToolError = class extends Error {
     constructor(code, message3, cause) {
       super(message3), this.name = "JsToolError", this.code = code, cause !== void 0 && (this.cause = cause);
     }
-  }, abortError5 = (message3) => typeof DOMException == "function" ? new DOMException(message3, "AbortError") : Object.assign(new Error(message3), { name: "AbortError" }), textOf = (value) => typeof value == "string" ? value : "", byteLength = (text3) => new TextEncoder().encode(text3).length, truncate2 = (text3, limit3 = MAX_RESULT_BYTES) => text3.length > limit3 ? `${text3.slice(0, limit3)}
+  }, abortError6 = (message3) => typeof DOMException == "function" ? new DOMException(message3, "AbortError") : Object.assign(new Error(message3), { name: "AbortError" }), textOf2 = (value) => typeof value == "string" ? value : "", byteLength = (text3) => new TextEncoder().encode(text3).length, truncate3 = (text3, limit3 = MAX_RESULT_BYTES) => text3.length > limit3 ? `${text3.slice(0, limit3)}
 \u2026[truncated at ${limit3} characters]\u2026` : text3;
   function safeJson(value) {
     let encoded;
@@ -70724,7 +71126,7 @@ ${command}` : command,
     } catch {
       encoded = JSON.stringify(String(value));
     }
-    return truncate2(encoded ?? "null");
+    return truncate3(encoded ?? "null");
   }
   function parseSemver(version) {
     let match2 = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(String(version ?? ""));
@@ -70807,15 +71209,15 @@ ${command}` : command,
   function licenseOf(value) {
     return typeof value == "string" ? value : value && typeof value == "object" && typeof value.type == "string" ? value.type : null;
   }
-  function packageSummary(doc, requestedVersion) {
+  function packageSummary2(doc, requestedVersion) {
     let latest = requestedVersion ?? doc?.["dist-tags"]?.latest ?? doc?.version ?? null, versionDoc = latest !== null ? doc?.versions?.[latest] : void 0, meta = { ...doc ?? {}, ...versionDoc ?? {}, version: latest ?? void 0 }, hints = browserHints(meta);
     return {
-      name: textOf(meta.name),
+      name: textOf2(meta.name),
       version: latest,
-      description: textOf(meta.description),
+      description: textOf2(meta.description),
       license: licenseOf(meta.license),
-      homepage: textOf(meta.homepage),
-      repository: typeof meta.repository == "string" ? meta.repository : textOf(meta.repository?.url),
+      homepage: textOf2(meta.homepage),
+      repository: typeof meta.repository == "string" ? meta.repository : textOf2(meta.repository?.url),
       keywords: Array.isArray(meta.keywords) ? meta.keywords.slice(0, 40) : [],
       distTags: doc?.["dist-tags"] ?? {},
       versions: Object.keys(doc?.versions ?? {}).sort().slice(-30),
@@ -70823,24 +71225,24 @@ ${command}` : command,
       integrity: typeof meta?.dist?.integrity == "string" ? meta.dist.integrity : null,
       dependencies: Object.keys(meta?.dependencies ?? {}).slice(0, 50),
       ...hints,
-      readme: truncate2(textOf(meta.readme), 4e3)
+      readme: truncate3(textOf2(meta.readme), 4e3)
     };
   }
   function cdnjsSummary(result) {
     return {
-      name: textOf(result?.name),
-      version: textOf(result?.version) || null,
-      description: textOf(result?.description),
+      name: textOf2(result?.name),
+      version: textOf2(result?.version) || null,
+      description: textOf2(result?.description),
       license: licenseOf(result?.license),
-      homepage: textOf(result?.homepage),
-      repository: typeof result?.repository == "string" ? result.repository : textOf(result?.repository?.url),
+      homepage: textOf2(result?.homepage),
+      repository: typeof result?.repository == "string" ? result.repository : textOf2(result?.repository?.url),
       source: "cdnjs",
       files: Array.isArray(result?.files) ? result.files.slice(0, 40) : [],
       browserCompatible: !0,
       warnings: []
     };
   }
-  function createHttp(transport4) {
+  function createHttp2(transport4) {
     if (typeof transport4 != "function") throw new TypeError("createJsTools requires the runtime transport");
     return async function(url, timeoutMs = 15e3) {
       let response;
@@ -70856,7 +71258,7 @@ ${command}` : command,
       let body = await response.text();
       if (!response.ok) {
         let code = response.status === 404 ? "not_found" : "http_status";
-        throw new JsToolError(code, `${url} answered HTTP ${response.status}${body ? `: ${truncate2(body, 400)}` : ""}`);
+        throw new JsToolError(code, `${url} answered HTTP ${response.status}${body ? `: ${truncate3(body, 400)}` : ""}`);
       }
       try {
         return JSON.parse(body);
@@ -70868,13 +71270,13 @@ ${command}` : command,
   async function searchNpm(getJson, query, limit3, timeoutMs) {
     let url = `${NPM_SEARCH}?text=${encodeURIComponent(query)}&size=${limit3}`;
     return ((await getJson(url, timeoutMs))?.objects ?? []).map((entry) => ({
-      name: textOf(entry?.package?.name),
-      version: textOf(entry?.package?.version) || null,
-      description: textOf(entry?.package?.description),
-      homepage: textOf(entry?.package?.links?.homepage),
-      repository: textOf(entry?.package?.links?.repository),
-      npm: textOf(entry?.package?.links?.npm),
-      publisher: textOf(entry?.package?.publisher?.username) || null,
+      name: textOf2(entry?.package?.name),
+      version: textOf2(entry?.package?.version) || null,
+      description: textOf2(entry?.package?.description),
+      homepage: textOf2(entry?.package?.links?.homepage),
+      repository: textOf2(entry?.package?.links?.repository),
+      npm: textOf2(entry?.package?.links?.npm),
+      publisher: textOf2(entry?.package?.publisher?.username) || null,
       source: "npm"
     })).filter((entry) => entry.name !== "");
   }
@@ -70902,12 +71304,12 @@ ${command}` : command,
       return { name: spec.name.trim(), version: spec.version === void 0 ? void 0 : String(spec.version) };
     throw new JsToolError("invalid_import", `An import must be a package name or { name, version }: ${JSON.stringify(spec)}`);
   }
-  function resolveInsideWorkspace(root, target) {
+  function resolveInsideWorkspace2(root, target) {
     let base = typeof root == "string" && root !== "" ? root : "/", path4 = resolve2(base, String(target));
     if (!(base === "/" || path4 === base || path4.startsWith(`${base}/`))) throw new JsToolError("workspace_escape", `${target} is outside the workspace (${base})`);
     return path4;
   }
-  function stringArray(value, field, max) {
+  function stringArray2(value, field, max) {
     if (value == null) return [];
     if (!Array.isArray(value)) throw new JsToolError("invalid_arguments", `${field} must be an array`);
     if (value.length > max) throw new JsToolError("invalid_arguments", `${field} may hold at most ${max} entries`);
@@ -70918,12 +71320,12 @@ ${command}` : command,
   }
   function createJsTools({ transport: transport4, call, workspaceRoot } = {}) {
     if (typeof call != "function") throw new TypeError("createJsTools requires the bridge call");
-    let getJson = createHttp(transport4), rootOf = typeof workspaceRoot == "function" ? workspaceRoot : () => typeof workspaceRoot == "string" ? workspaceRoot : "/", nextRun = 0;
+    let getJson = createHttp2(transport4), rootOf = typeof workspaceRoot == "function" ? workspaceRoot : () => typeof workspaceRoot == "string" ? workspaceRoot : "/", nextRun = 0;
     async function resolvePackage(name, version, range, timeoutMs) {
       try {
         let doc = await npmDoc(getJson, name, timeoutMs), chosen = chooseVersion(doc, version, range);
         return {
-          ...packageSummary(doc, chosen),
+          ...packageSummary2(doc, chosen),
           version: chosen,
           source: "npm",
           esm: `${ESM_SH}/${name}@${chosen}`,
@@ -70946,8 +71348,8 @@ ${command}` : command,
         };
       }
     }
-    async function writeLock(imports, moduleReports, context2) {
-      let path4 = resolveInsideWorkspace(rootOf(), JS_LOCK_PATH), existing = {};
+    async function writeLock(imports, moduleReports, runtime, context2) {
+      let path4 = resolveInsideWorkspace2(rootOf(), JS_LOCK_PATH), existing = {};
       try {
         let raw = await call("file.read", { path: path4 });
         typeof raw == "string" && raw.trim() !== "" && (existing = JSON.parse(raw));
@@ -70971,11 +71373,12 @@ ${command}` : command,
           sha256: typeof module.sha256 == "string" ? module.sha256 : null,
           bytes: Number.isFinite(module?.bytes) ? module.bytes : null
         });
-      let value = {
+      let runtimeEntries = runtime ?? {}, value = {
         version: 1,
         updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         packages,
-        ...Object.keys(modules).length > 0 ? { modules } : {}
+        ...Object.keys(modules).length > 0 ? { modules } : {},
+        ...Object.keys(runtimeEntries).length > 0 ? { runtime: runtimeEntries } : {}
       };
       try {
         return await call("file.write", { path: path4, text: `${JSON.stringify(value, null, 2)}
@@ -70987,6 +71390,25 @@ ${command}` : command,
           message: `The JS lockfile could not be written: ${error?.message ?? String(error)}`
         }), null;
       }
+    }
+    async function lockedPackage(name) {
+      let path4 = resolveInsideWorkspace2(rootOf(), JS_LOCK_PATH);
+      try {
+        let raw = await call("file.read", { path: path4 }), entry = JSON.parse(raw)?.packages?.[name];
+        if (entry && typeof entry.version == "string" && typeof entry.resolved == "string")
+          return {
+            name: typeof entry.name == "string" ? entry.name : name,
+            version: entry.version,
+            source: typeof entry.source == "string" ? entry.source : "npm",
+            esm: entry.resolved,
+            integrity: entry.integrity ?? null,
+            license: entry.license ?? null,
+            browserCompatible: entry.browserCompatible ?? null,
+            reused: !0
+          };
+      } catch {
+      }
+      return null;
     }
     let searchTool = {
       name: JS_SEARCH_TOOL_NAME,
@@ -71027,7 +71449,7 @@ ${command}` : command,
         }
         let values = [...unique.values()];
         return {
-          content: [{ type: "text", text: truncate2(JSON.stringify({ results: values }, null, 2)) }],
+          content: [{ type: "text", text: truncate3(JSON.stringify({ results: values }, null, 2)) }],
           details: { results: values }
         };
       }
@@ -71052,16 +71474,16 @@ ${command}` : command,
           let doc = await npmDoc(getJson, name.trim(), args?.timeoutMs);
           if (requested !== void 0 && doc?.versions?.[requested] === void 0)
             throw new JsToolError("version_not_found", `${name} has no version ${requested}`);
-          let summary = packageSummary(doc, requested);
+          let summary = packageSummary2(doc, requested);
           return {
-            content: [{ type: "text", text: truncate2(JSON.stringify({ ...summary, source: "npm" }, null, 2)) }],
+            content: [{ type: "text", text: truncate3(JSON.stringify({ ...summary, source: "npm" }, null, 2)) }],
             details: { ...summary, source: "npm" }
           };
         } catch (error) {
           if (error?.code !== "not_found") throw error;
           let info = await cdnjsDoc(getJson, name.trim(), args?.timeoutMs);
           return {
-            content: [{ type: "text", text: truncate2(JSON.stringify(info, null, 2)) }],
+            content: [{ type: "text", text: truncate3(JSON.stringify(info, null, 2)) }],
             details: info
           };
         }
@@ -71085,13 +71507,13 @@ ${command}` : command,
         if (typeof name != "string" || name.trim() === "") throw new JsToolError("invalid_name", "name is required");
         let info = await resolvePackage(name.trim(), args?.version, args?.range, args?.timeoutMs);
         return {
-          content: [{ type: "text", text: truncate2(JSON.stringify(info, null, 2)) }],
+          content: [{ type: "text", text: truncate3(JSON.stringify(info, null, 2)) }],
           details: info
         };
       }
     }, runTool = {
       name: JS_RUN_TOOL_NAME,
-      description: `Run JavaScript in the isolated JS sandbox. The sandbox has no app bridge: it exposes piImports (resolved packages, keyed by package name), piModules (declared workspace modules as real ESM, keyed by the path exactly as declared in modules and also by its absolute path), piInputs (declared input files as Uint8Array, keyed by absolute path), piInputPaths (those absolute paths as an array), piWrite(path, data) for declared output files, piOutputs (those absolute paths as an array), and console. The body is an async body, so await works and the return value becomes the result. Two patterns: (1) one-shot \u2014 declare inputs/outputs and write the whole logic inline; (2) reuse \u2014 write an .mjs file with write, declare it in modules, and keep the body to 1-3 lines calling it; a module may import other declared modules with relative specifiers, but not bare package names \u2014 pass a piImports value in from the body. A successful run hashes each resolved package and loaded module into .pi-js/lock.json. Example one-shot with a package: imports:["jszip"], inputs:["notes.zip"], code:"return Object.keys((await piImports['jszip'].loadAsync(piInputs[piInputPaths[0]]))?.files ?? {}).slice(0, 20);" \u2014 reuse: modules:["lib/extract.mjs"], code:"return piModules['lib/extract.mjs'].run(piInputs, piWrite);"`,
+      description: `Run JavaScript in the isolated JS sandbox. The sandbox has no app bridge: it exposes piImports (resolved packages, keyed by package name), piModules (declared workspace modules as real ESM, keyed by the path exactly as declared in modules and also by its absolute path), piInputs (declared input files as Uint8Array, keyed by absolute path), piInputPaths (those absolute paths as an array), piWrite(path, data) for declared output files, piOutputs (those absolute paths as an array), and console. The body is an async body, so await works and the return value becomes the result. Two patterns: (1) one-shot \u2014 declare inputs/outputs and write the whole logic inline; (2) reuse \u2014 write an .mjs file with write, declare it in modules, and keep the body to 1-3 lines calling it; a module may import other declared modules with relative specifiers, but not bare package names \u2014 pass a piImports value in from the body. A successful run hashes each resolved package and loaded module into .pi-js/lock.json. A plain package name reuses the lockfile's last-good pin with no network round trip; an explicit version bypasses it. Read ${SANDBOX_CAPABILITIES_TOOL_NAME} when unsure what this sandbox supports. Example one-shot with a package: imports:["jszip"], inputs:["notes.zip"], code:"return Object.keys((await piImports['jszip'].loadAsync(piInputs[piInputPaths[0]]))?.files ?? {}).slice(0, 20);" \u2014 reuse: modules:["lib/extract.mjs"], code:"return piModules['lib/extract.mjs'].run(piInputs, piWrite);"`,
       parameters: {
         type: "object",
         properties: {
@@ -71117,18 +71539,30 @@ ${command}` : command,
         let code = args?.code;
         if (typeof code != "string" || code.trim() === "") throw new JsToolError("invalid_code", "code is required");
         if (byteLength(code) > MAX_CODE_BYTES) throw new JsToolError("code_too_large", `code exceeds ${MAX_CODE_BYTES} bytes`);
-        let imports = stringArray(args?.imports, "imports", MAX_IMPORTS), modules = stringArray(args?.modules, "modules", MAX_MODULES), inputs = stringArray(args?.inputs, "inputs", MAX_FILES), outputs = stringArray(args?.outputs, "outputs", MAX_FILES), root = rootOf(), inputPaths = inputs.map((path4) => resolveInsideWorkspace(root, path4)), outputPaths = outputs.map((path4) => resolveInsideWorkspace(root, path4)), declared = /* @__PURE__ */ new Map();
+        let imports = stringArray2(args?.imports, "imports", MAX_IMPORTS), modules = stringArray2(args?.modules, "modules", MAX_MODULES), inputs = stringArray2(args?.inputs, "inputs", MAX_FILES2), outputs = stringArray2(args?.outputs, "outputs", MAX_FILES2), root = rootOf(), inputPaths = inputs.map((path4) => resolveInsideWorkspace2(root, path4)), outputPaths = outputs.map((path4) => resolveInsideWorkspace2(root, path4)), declared = /* @__PURE__ */ new Map();
         for (let name of modules) {
-          let path4 = resolveInsideWorkspace(root, name);
+          let path4 = resolveInsideWorkspace2(root, name);
           declared.has(path4) || declared.set(path4, name);
         }
-        let modulePaths = [...declared.keys()], moduleAliases = [...declared].map(([path4, name]) => ({ declared: name, path: path4 })), timeoutMs = args?.timeoutMs === void 0 ? DEFAULT_RUN_TIMEOUT_MS : Math.min(Math.max(Number(args.timeoutMs), 1), MAX_RUN_TIMEOUT_MS), resolved = [], importMap = {};
+        let modulePaths = [...declared.keys()], moduleAliases = [...declared].map(([path4, name]) => ({ declared: name, path: path4 })), timeoutMs = args?.timeoutMs === void 0 ? DEFAULT_RUN_TIMEOUT_MS2 : Math.min(Math.max(Number(args.timeoutMs), 1), MAX_RUN_TIMEOUT_MS2), resolved = [], importMap = {};
         for (let spec of imports) {
-          let parsed = parseImport(spec), info = await resolvePackage(parsed.name, parsed.version, void 0, void 0);
+          let parsed = parseImport(spec);
+          if (parsed.version === void 0 || parsed.version === "") {
+            let locked = await lockedPackage(parsed.name);
+            if (locked !== null) {
+              resolved.push(locked), importMap[parsed.name] = locked.esm, api.diagnostic({
+                severity: "info",
+                code: "lock_reuse",
+                message: `${parsed.name} resolved from ${JS_LOCK_PATH} at ${locked.version}`
+              });
+              continue;
+            }
+          }
+          let info = await resolvePackage(parsed.name, parsed.version, void 0, void 0);
           resolved.push(info), importMap[parsed.name] = info.esm;
         }
         let requestId3 = `js-run-${++nextRun}`, signal = context2?.abortSignal;
-        if (signal?.aborted === !0) throw abortError5("The JS run was aborted before it started");
+        if (signal?.aborted === !0) throw abortError6("The JS run was aborted before it started");
         let onAbort = () => {
           call("js.cancel", { requestId: requestId3 }).catch(() => {
           });
@@ -71147,25 +71581,49 @@ ${command}` : command,
             requestId: requestId3
           });
         } catch (error) {
-          throw signal?.aborted === !0 ? abortError5("The JS run was aborted") : new JsToolError("sandbox_error", `The JS sandbox refused the run: ${error?.message ?? String(error)}`, error);
+          throw signal?.aborted === !0 ? abortError6("The JS run was aborted") : new JsToolError("sandbox_error", `The JS sandbox refused the run: ${error?.message ?? String(error)}`, error);
         } finally {
           typeof signal?.removeEventListener == "function" && signal.removeEventListener("abort", onAbort);
         }
-        if (value?.cancelled === !0 || signal?.aborted === !0) throw abortError5("The JS run was aborted");
+        if (value?.cancelled === !0 || signal?.aborted === !0) throw abortError6("The JS run was aborted");
         if (value?.timedOut === !0) throw new JsToolError("timeout", `The JS run timed out after ${timeoutMs} ms`);
-        if (value?.ok !== !0)
-          throw new JsToolError("sandbox_error", textOf(value?.error) || "The JS sandbox failed without an error");
+        let verifiedOutputs = outputRecords(value);
+        if (value?.ok !== !0) {
+          let phase = textOf2(value?.phase) || "execution", errorType = textOf2(value?.errorType) || "Error", userLine = Number.isInteger(value?.userLine) ? value.userLine : null, message3 = textOf2(value?.message) || textOf2(value?.error) || "No message was reported.", whereClause = userLine !== null ? ` at user-code line ${userLine}` : "", traceLines = textOf2(value?.trace).split(`
+`).filter((line) => !line.includes("sandbox-worker.js")).slice(0, 12).join(`
+`);
+          return {
+            content: [{
+              type: "text",
+              text: truncate3(
+                `The JS run failed in the ${phase} phase: ${errorType}${whereClause}. ${message3}` + (traceLines === "" ? "" : `
+[trace]
+${traceLines}`)
+              )
+            }],
+            details: {
+              phase,
+              errorType,
+              userLine,
+              message: message3,
+              trace: value?.trace ?? null,
+              inputs: inputPaths,
+              outputs: outputRecords(value),
+              logs: Array.isArray(value?.logs) ? value.logs.map((entry) => String(entry)).slice(0, 200) : []
+            }
+          };
+        }
         let moduleReports = (Array.isArray(value.modules) ? value.modules : []).filter(
           (module) => module !== null && typeof module == "object"
-        ), lockPath = await writeLock(resolved, moduleReports, { api }), logs = Array.isArray(value.logs) ? value.logs.map((entry) => String(entry)).slice(0, 200) : [], resultText = value.result === void 0 ? "" : safeJson(value.result), blocks = [];
-        return moduleReports.length > 0 && blocks.push(`[modules]
+        ), webview = textOf2(value?.webview) || null, lockPath = await writeLock(resolved, moduleReports, { webview }, { api }), logs = Array.isArray(value.logs) ? value.logs.map((entry) => String(entry)).slice(0, 200) : [], resultText = value.result === void 0 ? "" : safeJson(value.result), blocks = [];
+        moduleReports.length > 0 && blocks.push(`[modules]
 ${moduleReports.map((module) => `${module.path}${typeof module.sha256 == "string" ? ` ${module.sha256}` : ""}`).join(`
-`)}`), logs.length > 0 && blocks.push(`[logs]
-${truncate2(logs.join(`
+`)}`);
+        let outputBlock = renderOutputBlock(verifiedOutputs);
+        return outputBlock !== null && blocks.push(outputBlock), logs.length > 0 && blocks.push(`[logs]
+${truncate3(logs.join(`
 `))}`), resultText !== "" && resultText !== "null" && blocks.push(`[result]
-${resultText}`), Array.isArray(value.outputs) && value.outputs.length > 0 && blocks.push(`[outputs]
-${value.outputs.join(`
-`)}`), blocks.length === 0 && blocks.push("The JS run completed without a result."), lockPath !== null && blocks.push(`[lock]
+${resultText}`), blocks.length === 0 && blocks.push("The JS run completed without a result."), lockPath !== null && blocks.push(`[lock]
 ${lockPath}`), {
           content: [{ type: "text", text: blocks.join(`
 
@@ -71178,11 +71636,12 @@ ${lockPath}`), {
               resolved: entry.esm,
               integrity: entry.integrity,
               license: entry.license,
-              browserCompatible: entry.browserCompatible
+              browserCompatible: entry.browserCompatible,
+              reused: entry.reused === !0
             })),
             modules: moduleReports,
             inputs: inputPaths,
-            outputs: outputPaths,
+            outputs: verifiedOutputs,
             logs,
             result: resultText,
             lockPath
@@ -71194,263 +71653,6 @@ ${lockPath}`), {
       name: JS_EXTENSION_NAME,
       tools: [searchTool, infoTool, resolveTool, runTool]
     };
-  }
-
-  // src/py-tools.mjs
-  init_buffer();
-  var PY_RESOLVE_TOOL_NAME = "py_resolve", PY_RUN_TOOL_NAME = "py_run", PY_EXTENSION_NAME = "py-sandbox", PYPI_JSON = "https://pypi.org/pypi", PYODIDE_VERSION = "0.26.2", PYODIDE_CDN = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full`, PY_LOCK_PATH = ".pi-py/lock.json", MAX_PY_CODE_BYTES = 256 * 1024, MAX_PY_IMPORTS = 12, MAX_FILES2 = 20, DEFAULT_RUN_TIMEOUT_MS2 = 12e4, MAX_RUN_TIMEOUT_MS2 = 18e4, PyToolError = class extends Error {
-    constructor(code, message3, cause) {
-      super(message3), this.name = "PyToolError", this.code = code, cause !== void 0 && (this.cause = cause);
-    }
-  }, abortError6 = (message3) => typeof DOMException == "function" ? new DOMException(message3, "AbortError") : Object.assign(new Error(message3), { name: "AbortError" }), textOf2 = (value) => typeof value == "string" ? value : "", truncate3 = (text3, limit3 = 256 * 1024) => text3.length > limit3 ? `${text3.slice(0, limit3)}
-\u2026[truncated at ${limit3} characters]\u2026` : text3;
-  function resolveInsideWorkspace2(root, target) {
-    let base = typeof root == "string" && root !== "" ? root : "/", path4 = resolve2(base, String(target));
-    if (!(base === "/" || path4 === base || path4.startsWith(`${base}/`))) throw new PyToolError("workspace_escape", `${target} is outside the workspace (${base})`);
-    return path4;
-  }
-  function createHttp2(transport4) {
-    if (typeof transport4 != "function") throw new TypeError("createPyTools requires the runtime transport");
-    return async function(url, timeoutMs = 15e3) {
-      let response;
-      try {
-        response = await transport4(url, {
-          method: "GET",
-          headers: { accept: "application/json" },
-          timeoutMs
-        });
-      } catch (error) {
-        throw new PyToolError("network_error", `Could not reach ${url}: ${error?.message ?? String(error)}`, error);
-      }
-      let body = await response.text();
-      if (!response.ok) {
-        let code = response.status === 404 ? "not_found" : "http_status";
-        throw new PyToolError(code, `${url} answered HTTP ${response.status}${body ? `: ${truncate3(body, 400)}` : ""}`);
-      }
-      try {
-        return JSON.parse(body);
-      } catch (error) {
-        throw new PyToolError("invalid_response", `${url} did not return JSON`, error);
-      }
-    };
-  }
-  function chooseFile(entries) {
-    let files = (Array.isArray(entries) ? entries : []).filter((entry) => typeof entry?.filename == "string"), pure = files.find((entry) => /py3-none-any\.whl$/i.test(entry.filename)) ?? files.find((entry) => /py2\.py3-none-any\.whl$/i.test(entry.filename));
-    if (pure !== void 0) return { file: pure, pure: !0, warnings: [] };
-    let platform = files.find((entry) => entry.filename.endsWith(".whl"));
-    if (platform !== void 0)
-      return { file: platform, pure: !1, warnings: [`non-pure wheel: ${platform.filename} will not install in the sandbox`] };
-    let sdist = files.find((entry) => entry.filename.endsWith(".tar.gz")) ?? files[0];
-    return sdist !== void 0 ? { file: sdist, pure: !1, warnings: [`no wheel for this version: ${sdist.filename} cannot install in the sandbox`] } : null;
-  }
-  async function pypiDoc(getJson, name, timeoutMs) {
-    return getJson(`${PYPI_JSON}/${name}/json`, timeoutMs);
-  }
-  function packageSummary2(doc, chosenVersion, warn) {
-    let info = doc?.info ?? {};
-    return {
-      name: textOf2(info.name),
-      version: chosenVersion,
-      summary: textOf2(info.summary),
-      license: textOf2(info.license) || null,
-      homepage: textOf2(info.home_page) || textOf2(info.project_urls?.Homepage) || null,
-      requiresPython: textOf2(info.requires_python) || null,
-      ...warn ?? { pure: null, warnings: [] }
-    };
-  }
-  function createPyTools({ transport: transport4, call, workspaceRoot } = {}) {
-    if (typeof call != "function") throw new TypeError("createPyTools requires the bridge call");
-    let getJson = createHttp2(transport4), rootOf = typeof workspaceRoot == "function" ? workspaceRoot : () => typeof workspaceRoot == "string" ? workspaceRoot : "/", nextRun = 0;
-    async function resolvePackage(name, version, timeoutMs) {
-      if (typeof name != "string" || name.trim() === "")
-        throw new PyToolError("invalid_name", "name is required");
-      let doc = await pypiDoc(getJson, name.trim(), timeoutMs), chosen = version === void 0 || version === "" ? doc?.info?.version : String(version), versioned = doc?.urls ?? [];
-      if ((doc?.info?.version ?? "") !== chosen) {
-        if (!doc?.releases?.[chosen]) throw new PyToolError("version_not_found", `${name} has no version ${chosen}`);
-        versioned = doc.releases[chosen];
-      }
-      let pick = chooseFile(versioned);
-      if (pick === null) throw new PyToolError("no_files", `${name} ${chosen} has no installable file entry`);
-      return {
-        ...packageSummary2(doc, chosen),
-        resolved: `${name.trim()}==${chosen}`,
-        filename: pick.file.filename,
-        bytes: Number.isFinite(pick.file.size) ? pick.file.size : null,
-        sha256: typeof pick.file.digests?.sha256 == "string" ? pick.file.digests.sha256 : null,
-        url: pick.file.url,
-        pure: pick.pure,
-        warnings: pick.warnings
-      };
-    }
-    async function writeLock(resolved, context2) {
-      let path4 = resolveInsideWorkspace2(rootOf(), PY_LOCK_PATH), existing = {};
-      try {
-        let raw = await call("file.read", { path: path4 });
-        typeof raw == "string" && raw.trim() !== "" && (existing = JSON.parse(raw));
-      } catch {
-      }
-      let packages = { ...existing.packages ?? {} };
-      for (let entry of resolved)
-        packages[entry.name] = {
-          name: entry.name,
-          version: entry.version,
-          source: entry.source,
-          resolved: entry.resolved,
-          integrity: entry.sha256,
-          pure: entry.pure
-        };
-      let value = {
-        version: 1,
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        packages
-      };
-      try {
-        return await call("file.write", { path: path4, text: `${JSON.stringify(value, null, 2)}
-` }), path4;
-      } catch (error) {
-        return context2?.api?.diagnostic?.({
-          severity: "warn",
-          code: "lock_write_failed",
-          message: `The Python lockfile could not be written: ${error?.message ?? String(error)}`
-        }), null;
-      }
-    }
-    let resolveTool = {
-      name: PY_RESOLVE_TOOL_NAME,
-      description: `Resolve a PyPI package name to an exact version, the wheel a pure-Python install would use, its SHA-256 and a purity verdict. This is also the metadata lookup (there is no PyPI search endpoint; discovery is your own knowledge): ${PY_RUN_TOOL_NAME} pins what this returns, reaching it as the resolved package inside the Pyodide interpreter.`,
-      parameters: {
-        type: "object",
-        properties: {
-          name: { type: "string", description: 'Package name, e.g. "pypdf".' },
-          version: { type: "string", description: "Exact version. Omit for latest. Ranges are not supported by design." },
-          timeoutMs: { type: "integer", description: "Abort the metadata request after this many milliseconds." }
-        },
-        required: ["name"],
-        additionalProperties: !1
-      },
-      async execute(args, api) {
-        let info = await resolvePackage(args?.name, args?.version, args?.timeoutMs), blocks = [JSON.stringify(info, null, 2)];
-        return info.pure !== !0 && blocks.push(`\u26A0 ${info.warnings.join("; ")}`), api?.diagnostic?.({
-          severity: info.pure === !0 ? "info" : "warn",
-          code: "py_purity",
-          message: `${info.name} ${info.version}: ${info.pure === !0 ? "pure wheel" : info.warnings.join("; ")}`
-        }), {
-          content: [{ type: "text", text: truncate3(blocks.join(`
-
-`)) }],
-          details: info
-        };
-      }
-    }, runTool = {
-      name: PY_RUN_TOOL_NAME,
-      description: "Run Python in the isolated sandbox on Pyodide (CPython compiled to WebAssembly). The sandbox has no app bridge: it exposes piInputs (declared input files as memoryview, keyed by absolute path \u2014 use .tobytes().decode() for text), piInputPaths (those absolute paths as a list), piWrite(path, bytes) for declared output files, piOutputs (those absolute paths as a list), and print/stdout (which becomes the run's log). Declared packages are installed with micropip from PyPI \u2014 pure-Python wheels only; numpy, pandas, pillow and the like ship inside Pyodide itself. The body is indented function code dedented automatically and runs inside `async def __pi_main__():`, so await and return both work and the return value must be JSON-safe (use .dumps if in doubt). A successful run pins every resolved package into .pi-py/lock.json. Known-good packages: pypdf, pdfminer.six, python-docx, openpyxl, pytz, six.",
-      parameters: {
-        type: "object",
-        properties: {
-          code: { type: "string", description: "Python body. Use piInputs, piInputPaths, piWrite, piOutputs, print. return the result." },
-          imports: {
-            type: "array",
-            items: { type: "string" },
-            description: "PyPI package names to resolve to an exact version and install with micropip."
-          },
-          inputs: { type: "array", items: { type: "string" }, description: "Workspace files to expose in piInputs." },
-          outputs: { type: "array", items: { type: "string" }, description: "Workspace files piWrite may create." },
-          timeoutMs: { type: "integer", description: "Kill the sandbox after this many milliseconds. Default 120000; max 180000." }
-        },
-        required: ["code"],
-        additionalProperties: !1
-      },
-      async execute(args, api, context2) {
-        let code = args?.code;
-        if (typeof code != "string" || code.trim() === "") throw new PyToolError("invalid_code", "code is required");
-        if (new TextEncoder().encode(code).length > MAX_PY_CODE_BYTES)
-          throw new PyToolError("code_too_large", `code exceeds ${MAX_PY_CODE_BYTES} bytes`);
-        let imports = stringArray2(args?.imports, "imports", MAX_PY_IMPORTS), inputs = stringArray2(args?.inputs, "inputs", MAX_FILES2), outputs = stringArray2(args?.outputs, "outputs", MAX_FILES2), root = rootOf(), inputPaths = inputs.map((path4) => resolveInsideWorkspace2(root, path4)), outputPaths = outputs.map((path4) => resolveInsideWorkspace2(root, path4)), timeoutMs = args?.timeoutMs === void 0 ? DEFAULT_RUN_TIMEOUT_MS2 : Math.min(Math.max(Number(args.timeoutMs), 1), MAX_RUN_TIMEOUT_MS2), resolved = [];
-        for (let name of imports)
-          resolved.push(await resolvePackage(name, void 0, void 0));
-        let requestId3 = `py-run-${++nextRun}`, signal = context2?.abortSignal;
-        if (signal?.aborted === !0) throw abortError6("The Python run was aborted before it started");
-        let onAbort = () => {
-          call("py.cancel", { requestId: requestId3 }).catch(() => {
-          });
-        };
-        typeof signal?.addEventListener == "function" && signal.addEventListener("abort", onAbort, { once: !0 });
-        let value;
-        try {
-          value = await call("py.run", {
-            code,
-            imports: resolved.map((entry) => entry.resolved),
-            pyodide: { url: `${PYODIDE_CDN}/pyodide.mjs`, indexUrl: `${PYODIDE_CDN}/` },
-            inputs: inputPaths,
-            outputs: outputPaths,
-            timeoutMs,
-            requestId: requestId3
-          });
-        } catch (error) {
-          throw signal?.aborted === !0 ? abortError6("The Python run was aborted") : new PyToolError("sandbox_error", `The Python sandbox refused the run: ${error?.message ?? String(error)}`, error);
-        } finally {
-          typeof signal?.removeEventListener == "function" && signal.removeEventListener("abort", onAbort);
-        }
-        if (value?.cancelled === !0 || signal?.aborted === !0) throw abortError6("The Python run was aborted");
-        if (value?.timedOut === !0) throw new PyToolError("timeout", `The Python run timed out after ${timeoutMs} ms`);
-        if (value?.ok !== !0)
-          throw new PyToolError("sandbox_error", textOf2(value?.error) || "The Python sandbox failed without an error");
-        let lockPath = await writeLock(resolved, { api }), logs = Array.isArray(value.logs) ? value.logs.map((entry) => String(entry)).slice(0, 200) : [], resultText = value.result === void 0 ? "" : truncate3(safeText(value.result)), blocks = [];
-        return logs.length > 0 && blocks.push(`[logs]
-${truncate3(logs.join(`
-`))}`), resultText !== "" && resultText !== "null" && blocks.push(`[result]
-${resultText}`), Array.isArray(value.outputs) && value.outputs.length > 0 && blocks.push(`[outputs]
-${value.outputs.join(`
-`)}`), blocks.length === 0 && blocks.push("The Python run completed without a result."), lockPath !== null && blocks.push(`[lock]
-${lockPath}`), {
-          content: [{ type: "text", text: blocks.join(`
-
-`) }],
-          details: {
-            imports: resolved.map((entry) => ({
-              name: entry.name,
-              version: entry.version,
-              source: entry.source,
-              resolved: entry.resolved,
-              integrity: entry.sha256,
-              pure: entry.pure
-            })),
-            inputs: inputPaths,
-            outputs: outputPaths,
-            logs,
-            result: resultText,
-            lockPath
-          }
-        };
-      }
-    };
-    return {
-      name: PY_EXTENSION_NAME,
-      tools: [resolveTool, runTool]
-    };
-  }
-  function safeText(result) {
-    if (result === void 0) return "";
-    if (typeof result == "string")
-      try {
-        return JSON.stringify(JSON.parse(result));
-      } catch {
-        return result;
-      }
-    try {
-      return JSON.stringify(result);
-    } catch {
-      return String(result);
-    }
-  }
-  function stringArray2(value, field, max) {
-    if (value == null) return [];
-    if (!Array.isArray(value)) throw new PyToolError("invalid_arguments", `${field} must be an array`);
-    if (value.length > max) throw new PyToolError("invalid_arguments", `${field} may hold at most ${max} entries`);
-    return value.map((entry) => {
-      if (typeof entry != "string" || entry.trim() === "") throw new PyToolError("invalid_arguments", `${field} entries must be non-empty strings`);
-      return entry.trim();
-    });
   }
 
   // src/run-script-tool.mjs
@@ -79552,7 +79754,7 @@ printf ${PROBE_SCRIPT_OUTPUT}
       transport: transport4,
       call: bridge3.call,
       workspaceRoot: () => state3.workspaceRoot
-    })), registry2.install(createRunScriptTools({
+    })), registry2.install(createSandboxInfo()), registry2.install(createRunScriptTools({
       call: bridge3.call,
       workspaceRoot: () => state3.workspaceRoot,
       // The shell's limits are the host's, not this side's: `shell.capabilities` answers with the cap

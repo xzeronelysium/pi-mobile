@@ -173,7 +173,7 @@ test('the packaged asset is byte-for-byte what the current source builds', async
     assert.ok(fresh.length > 0, 'the build produced an empty bundle');
     assert.equal(
       digest(fresh),
-      '7632d3033fc53e8162d70b3c62f797945ad2f3180192bec2a9c67f3bbbb6e7ba',
+      '3017ee56c4d132605aa8e70e5c01a9f08de3c257c12839262f00854dc56e1409',
       'the runtime build changed; rebuild app/src/main/assets/native-runtime/runtime.js',
     );
     const shipped = await readFile(SHIPPED_BUNDLE);

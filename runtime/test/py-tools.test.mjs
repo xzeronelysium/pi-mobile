@@ -36,7 +36,7 @@ const PYPI_PLATFORM_DOC = {
   urls: [{ filename: 'lxml-5.1.0-cp312-cp312-manylinux.whl', size: 5_000_000, digests: { sha256: 'plat-sha' } }],
 };
 
-function createHarness({ pypi = PYPI_DOC, run } = {}) {
+function createHarness({ pypi = PYPI_DOC, run, lock = '' } = {}) {
   const calls = [];
   const requests = [];
   const transport = async (url, init = {}) => {
@@ -52,11 +52,15 @@ function createHarness({ pypi = PYPI_DOC, run } = {}) {
     calls.push({ op, args });
     if (op === 'py.run') {
       return run === undefined
-        ? { ok: true, result: '"42"', logs: ['log: hello'], outputs: args.outputs }
+        ? {
+            ok: true, result: '42', logs: ['log: hello'],
+            outputs: (args.outputs ?? []).map(path => ({ path, bytes: 9, sha256: `out-${path}` })),
+            webview: '100.0',
+          }
         : run;
     }
     if (op === 'py.cancel') return null;
-    if (op === 'file.read') return '';
+    if (op === 'file.read') return lock;
     if (op === 'file.write') return null;
     throw new Error(`Unexpected op ${op}`);
   };
@@ -128,8 +132,48 @@ test('py_run passes the pinned specs, declared paths and interpreter pin to the 
   assert.equal(parsed.packages['pypdf'].version, '4.2.0');
   assert.equal(parsed.packages['pypdf'].integrity, 'pure-sha');
   assert.equal(parsed.packages['pypdf'].pure, true);
+  assert.equal(parsed.runtime.pyodide, PYODIDE_VERSION);
+  assert.equal(parsed.runtime.webview, '100.0');
+  assert.match(result.content[0].text, /\[outputs\][\s\S]*9 bytes[\s\S]*sha256:out-/);
   assert.match(result.content[0].text, /pypdf==|42|logs/);
   assert.equal(result.details.lockPath, '/workspace/.pi-py/lock.json');
+  assert.deepEqual(result.details.outputs[0], { path: '/workspace/out/text.txt', bytes: 9, sha256: 'out-/workspace/out/text.txt' });
+});
+
+test('a plain package name resolves from the Python lockfile with no network round trip', async () => {
+  const lock = JSON.stringify({
+    version: 1,
+    packages: { pypdf: { name: 'pypdf', version: '3.0.0', source: 'pypi', resolved: 'pypdf==3.0.0', integrity: 'old-sha', pure: true } },
+  });
+  const { tool, calls, requests } = createHarness({ lock });
+  const result = await tool(PY_RUN_TOOL_NAME).execute({
+    code: 'return 1;',
+    imports: ['pypdf'],
+  }, api(), {});
+  const run = calls.find(call => call.op === 'py.run');
+  assert.deepEqual(run.args.imports, ['pypdf==3.0.0']);
+  assert.deepEqual(requests, [], 'PyPI was never asked');
+  assert.equal(result.details.imports[0].reused, true);
+  assert.equal(result.details.imports[0].version, '3.0.0');
+});
+
+test('a structured Python failure reports phase, type, user line and keeps the traceback', async () => {
+  const trace = [
+    'Traceback (most recent call last):',
+    '  File "/lib/python312.zip/_pyodide/_base.py", line 596, in eval_code_async',
+    '  File "<exec>", line 6, in <module>',
+    '  File "<exec>", line 2, in __pi_main__',
+    'ValueError: intentional diagnostic error',
+  ].join('\n');
+  const { tool } = createHarness({
+    run: { ok: false, phase: 'execution', errorType: 'ValueError', userLine: 1, message: 'intentional diagnostic error', error: 'ValueError: intentional diagnostic error', trace },
+  });
+  const result = await tool(PY_RUN_TOOL_NAME).execute({ code: 'raise ValueError("intentional diagnostic error")' }, api(), {});
+  assert.match(result.content[0].text, /failed in the execution phase: ValueError at user-code line 1/);
+  assert.match(result.content[0].text, /intentional diagnostic error/);
+  assert.equal(result.details.errorType, 'ValueError');
+  assert.equal(result.details.userLine, 1);
+  assert.ok(result.details.trace.includes('eval_code_async'), 'the full traceback stays available in details');
 });
 
 test('a failed resolution never starts the Python sandbox', async () => {

@@ -40,7 +40,7 @@ function json(value, status = 200) {
   });
 }
 
-function createHarness({ npm = NPM_DOC, npmStatus = 200, cdnjs = [], run } = {}) {
+function createHarness({ npm = NPM_DOC, npmStatus = 200, cdnjs = [], run, lock = '' } = {}) {
   const calls = [];
   const requests = [];
   const transport = async (url, init = {}) => {
@@ -86,13 +86,14 @@ function createHarness({ npm = NPM_DOC, npmStatus = 200, cdnjs = [], run } = {})
     if (op === 'js.run') {
       return run === undefined
         ? {
-            ok: true, result: { pages: 2 }, logs: ['log: ok'], outputs: args.outputs,
+            ok: true, result: { pages: 2 }, logs: ['log: ok'], webview: '100.0',
+            outputs: (args.outputs ?? []).map(path => ({ path, bytes: 5, sha256: `out-${path}` })),
             modules: (args.modules ?? []).map(path => ({ path, sha256: `sha-${path}`, bytes: 5 })),
           }
         : run;
     }
     if (op === 'js.cancel') return null;
-    if (op === 'file.read') return '';
+    if (op === 'file.read') return lock;
     if (op === 'file.write') return null;
     throw new Error(`Unexpected op ${op}`);
   };
@@ -185,10 +186,71 @@ test('js_run resolves imports, passes declared paths to the sandbox and writes t
   assert.equal(parsed.packages['pdfjs-dist'].version, '4.0.379');
   assert.equal(parsed.packages['pdfjs-dist'].integrity, 'sha512-new');
   assert.equal(parsed.modules['/workspace/lib/tools.mjs'].sha256, 'sha-/workspace/lib/tools.mjs');
+  assert.equal(parsed.runtime.webview, '100.0');
   assert.match(result.content[0].text, /pages/);
   assert.match(result.content[0].text, /\[modules\][\s\S]*lib\/tools\.mjs/);
+  assert.match(result.content[0].text, /\[outputs\][\s\S]*5 bytes[\s\S]*sha256:out-/);
   assert.equal(result.details.lockPath, '/workspace/.pi-js/lock.json');
   assert.deepEqual(result.details.modules[0].sha256, 'sha-/workspace/lib/tools.mjs');
+  assert.deepEqual(result.details.outputs[0].path, '/workspace/out/page-1.png');
+  assert.deepEqual(result.details.outputs[0].bytes, 5);
+});
+
+test('a plain package name resolves from the lockfile with no network round trip', async () => {
+  const lock = JSON.stringify({
+    version: 1,
+    packages: {
+      'pdfjs-dist': {
+        name: 'pdfjs-dist', version: '3.11.174', source: 'npm',
+        resolved: 'https://esm.sh/pdfjs-dist@3.11.174', integrity: 'sha512-old', browserCompatible: true,
+      },
+    },
+  });
+  const { tool, calls, requests } = createHarness({ lock });
+  const result = await tool(JS_RUN_TOOL_NAME).execute({
+    code: 'return piImports["pdfjs-dist"].version;',
+    imports: ['pdfjs-dist'],
+  }, api(), {});
+  const run = calls.find(call => call.op === 'js.run');
+  assert.equal(run.args.imports['pdfjs-dist'], 'https://esm.sh/pdfjs-dist@3.11.174');
+  assert.deepEqual(requests, [], 'the registry was never asked');
+  assert.equal(result.details.imports[0].version, '3.11.174');
+  assert.equal(result.details.imports[0].reused, true);
+  const written = JSON.parse(calls.find(call => call.op === 'file.write').args.text);
+  assert.equal(written.packages['pdfjs-dist'].integrity, 'sha512-old');
+});
+
+test('an explicit version bypasses the lockfile and the registry answers', async () => {
+  const lock = JSON.stringify({
+    version: 1,
+    packages: { 'pdfjs-dist': { name: 'pdfjs-dist', version: '3.11.174', source: 'npm', resolved: 'https://esm.sh/pdfjs-dist@3.11.174', integrity: 'sha512-old' } },
+  });
+  const { tool, requests } = createHarness({ lock });
+  await tool(JS_RUN_TOOL_NAME).execute({ code: 'return 1;', imports: ['pdfjs-dist@4.0.379'] }, api(), {});
+  assert.ok(requests.some(request => request.url.startsWith('https://registry.npmjs.org/')));
+});
+
+test('a structured sandbox failure reports phase, type, user line and keeps the trace', async () => {
+  const { tool } = createHarness({
+    run: {
+      ok: false,
+      phase: 'execution',
+      errorType: 'TypeError',
+      userLine: 2,
+      message: 'x is not a function',
+      error: 'x is not a function',
+      trace: 'TypeError: x is not a function\n at (<anonymous>):3:11\n at self.onmessage (sandbox-worker.js:120:5)',
+    },
+  });
+  const result = await tool(JS_RUN_TOOL_NAME).execute({ code: 'return x.y;' }, api(), {});
+  assert.match(result.content[0].text, /failed in the execution phase: TypeError at user-code line 2/);
+  assert.match(result.content[0].text, /x is not a function/);
+  assert.match(result.content[0].text, /\[trace\]/);
+  assert.equal(result.content[0].text.includes('sandbox-worker.js'), false, 'worker-internal frames stay in the details, not the result');
+  assert.equal(result.details.errorType, 'TypeError');
+  assert.equal(result.details.userLine, 2);
+  assert.equal(result.details.phase, 'execution');
+  assert.ok(result.details.trace.includes('sandbox-worker.js'), 'the full trace remains available in details');
 });
 
 test('js_run deduplicates workspace modules and refuses more than the cap', async () => {

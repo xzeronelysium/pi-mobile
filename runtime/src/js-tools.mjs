@@ -17,6 +17,8 @@
 
 import { defineExtension, defineTool } from '@earendil-works/pi-durable';
 import { resolve as resolvePath } from './path.mjs';
+import { outputRecords, renderOutputBlock } from './sandbox-shared.mjs';
+import { SANDBOX_CAPABILITIES_TOOL_NAME } from './sandbox-info.mjs';
 
 export const JS_SEARCH_TOOL_NAME = 'js_search';
 export const JS_INFO_TOOL_NAME = 'js_info';
@@ -370,7 +372,7 @@ export function createJsTools({ transport, call, workspaceRoot } = {}) {
     }
   }
 
-  async function writeLock(imports, moduleReports, context) {
+  async function writeLock(imports, moduleReports, runtime, context) {
     const path = resolveInsideWorkspace(rootOf(), JS_LOCK_PATH);
     let existing = {};
     try {
@@ -400,11 +402,14 @@ export function createJsTools({ transport, call, workspaceRoot } = {}) {
         bytes: Number.isFinite(module?.bytes) ? module.bytes : null,
       };
     }
+    // The runtime beside the dependencies: an entry pins which interpreter produced this lock.
+    const runtimeEntries = runtime ?? {};
     const value = {
       version: 1,
       updatedAt: new Date().toISOString(),
       packages,
       ...(Object.keys(modules).length > 0 ? { modules } : {}),
+      ...(Object.keys(runtimeEntries).length > 0 ? { runtime: runtimeEntries } : {}),
     };
     try {
       await call('file.write', { path, text: `${JSON.stringify(value, null, 2)}\n` });
@@ -417,6 +422,34 @@ export function createJsTools({ transport, call, workspaceRoot } = {}) {
       });
       return null;
     }
+  }
+
+  /**
+   * A plain name resolved by the last good run: the lockfile entry stands in for the registry, so
+   * a repeat run keeps its exact resolved URL without touching the network, and any `latest`-style
+   * drift stays pinned to what worked before. A spec with an explicit version skips the lock — the
+   * model asked for something the lock does not hold. Integrity is carried as recorded; strict
+   * re-verification of a CDN download is the warm-cache follow-up, not this pass.
+   */
+  async function lockedPackage(name) {
+    const path = resolveInsideWorkspace(rootOf(), JS_LOCK_PATH);
+    try {
+      const raw = await call('file.read', { path });
+      const entry = JSON.parse(raw)?.packages?.[name];
+      if (entry && typeof entry.version === 'string' && typeof entry.resolved === 'string') {
+        return {
+          name: typeof entry.name === 'string' ? entry.name : name,
+          version: entry.version,
+          source: typeof entry.source === 'string' ? entry.source : 'npm',
+          esm: entry.resolved,
+          integrity: entry.integrity ?? null,
+          license: entry.license ?? null,
+          browserCompatible: entry.browserCompatible ?? null,
+          reused: true,
+        };
+      }
+    } catch { /* no lock, or an unreadable one: resolve from the registry as usual */ }
+    return null;
   }
 
   const searchTool = defineTool({
@@ -556,7 +589,9 @@ export function createJsTools({ transport, call, workspaceRoot } = {}) {
       + `— declare inputs/outputs and write the whole logic inline; (2) reuse — write an .mjs file with write, declare `
       + `it in modules, and keep the body to 1-3 lines calling it; a module may import other declared modules with `
       + `relative specifiers, but not bare package names — pass a piImports value in from the body. A successful run `
-      + `hashes each resolved package and loaded module into .pi-js/lock.json. `
+      + `hashes each resolved package and loaded module into .pi-js/lock.json. A plain package name `
+      + `reuses the lockfile's last-good pin with no network round trip; an explicit version bypasses it. `
+      + `Read ${SANDBOX_CAPABILITIES_TOOL_NAME} when unsure what this sandbox supports. `
       + `Example one-shot with a package: imports:["jszip"], inputs:["notes.zip"], `
       + `code:"return Object.keys((await piImports['jszip'].loadAsync(piInputs[piInputPaths[0]]))?.files ?? {}).slice(0, 20);" `
       + `— reuse: modules:["lib/extract.mjs"], code:"return piModules['lib/extract.mjs'].run(piInputs, piWrite);"`,
@@ -607,11 +642,26 @@ export function createJsTools({ transport, call, workspaceRoot } = {}) {
         : Math.min(Math.max(Number(args.timeoutMs), 1), MAX_RUN_TIMEOUT_MS);
 
       // Resolve every import before starting the sandbox; a failed resolution must not leave a
-      // WebView running.
+      // WebView running. A plain name first stands on the lockfile: the last good run's pin is
+      // reusable without a network round trip. Only a name the lock does not hold — or a spec with
+      // an explicit version — goes to the registry.
       const resolved = [];
       const importMap = {};
       for (const spec of imports) {
         const parsed = parseImport(spec);
+        if (parsed.version === undefined || parsed.version === '') {
+          const locked = await lockedPackage(parsed.name);
+          if (locked !== null) {
+            resolved.push(locked);
+            importMap[parsed.name] = locked.esm;
+            api.diagnostic({
+              severity: 'info',
+              code: 'lock_reuse',
+              message: `${parsed.name} resolved from ${JS_LOCK_PATH} at ${locked.version}`,
+            });
+            continue;
+          }
+        }
         const info = await resolvePackage(parsed.name, parsed.version, undefined, undefined);
         resolved.push(info);
         importMap[parsed.name] = info.esm;
@@ -643,23 +693,57 @@ export function createJsTools({ transport, call, workspaceRoot } = {}) {
 
       if (value?.cancelled === true || signal?.aborted === true) throw abortError('The JS run was aborted');
       if (value?.timedOut === true) throw new JsToolError('timeout', `The JS run timed out after ${timeoutMs} ms`);
+      const verifiedOutputs = outputRecords(value);
+      // A sandbox failure is a structured report, not a refusal to render: the result text names
+      // the phase, the error type and the proven user-code line, and the internal trace rides in
+      // the details — a thrown diagnostic would strip both on the way out.
       if (value?.ok !== true) {
-        throw new JsToolError('sandbox_error', textOf(value?.error) || 'The JS sandbox failed without an error');
+        const phase = textOf(value?.phase) || 'execution';
+        const errorType = textOf(value?.errorType) || 'Error';
+        const userLine = Number.isInteger(value?.userLine) ? value.userLine : null;
+        const message = textOf(value?.message) || textOf(value?.error) || 'No message was reported.';
+        const whereClause = userLine !== null ? ` at user-code line ${userLine}` : '';
+        const traceLines = textOf(value?.trace)
+          .split('\n')
+          .filter(line => !line.includes('sandbox-worker.js'))
+          .slice(0, 12)
+          .join('\n');
+        return {
+          content: [{
+            type: 'text',
+            text: truncate(
+              `The JS run failed in the ${phase} phase: ${errorType}${whereClause}. ${message}`
+                + (traceLines === '' ? '' : `\n[trace]\n${traceLines}`),
+            ),
+          }],
+          details: {
+            phase,
+            errorType,
+            userLine,
+            message,
+            trace: value?.trace ?? null,
+            inputs: inputPaths,
+            outputs: outputRecords(value),
+            logs: Array.isArray(value?.logs) ? value.logs.map(entry => String(entry)).slice(0, 200) : [],
+          },
+        };
       }
 
       const moduleReports = (Array.isArray(value.modules) ? value.modules : []).filter(
         module => module !== null && typeof module === 'object',
       );
-      const lockPath = await writeLock(resolved, moduleReports, { api });
+      const webview = textOf(value?.webview) || null;
+      const lockPath = await writeLock(resolved, moduleReports, { webview }, { api });
       const logs = Array.isArray(value.logs) ? value.logs.map(entry => String(entry)).slice(0, 200) : [];
       const resultText = value.result === undefined ? '' : safeJson(value.result);
       const blocks = [];
       if (moduleReports.length > 0) {
         blocks.push(`[modules]\n${moduleReports.map(module => `${module.path}${typeof module.sha256 === 'string' ? ` ${module.sha256}` : ''}`).join('\n')}`);
       }
+      const outputBlock = renderOutputBlock(verifiedOutputs);
+      if (outputBlock !== null) blocks.push(outputBlock);
       if (logs.length > 0) blocks.push(`[logs]\n${truncate(logs.join('\n'))}`);
       if (resultText !== '' && resultText !== 'null') blocks.push(`[result]\n${resultText}`);
-      if (Array.isArray(value.outputs) && value.outputs.length > 0) blocks.push(`[outputs]\n${value.outputs.join('\n')}`);
       if (blocks.length === 0) blocks.push('The JS run completed without a result.');
       if (lockPath !== null) blocks.push(`[lock]\n${lockPath}`);
 
@@ -674,10 +758,11 @@ export function createJsTools({ transport, call, workspaceRoot } = {}) {
             integrity: entry.integrity,
             license: entry.license,
             browserCompatible: entry.browserCompatible,
+            reused: entry.reused === true,
           })),
           modules: moduleReports,
           inputs: inputPaths,
-          outputs: outputPaths,
+          outputs: verifiedOutputs,
           logs,
           result: resultText,
           lockPath,

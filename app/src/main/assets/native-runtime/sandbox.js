@@ -62,7 +62,19 @@
         return;
       }
       if (message.type === 'error') {
-        report({ ok: false, error: message.error, logs });
+        // The worker's error is structured: phase, user-facing type and message, the proven
+        // user-code line, and the internal trace as optional debugging material. The structured
+        // report carries `message`, and `error` stays as the legacy alias the tools already read.
+        report({
+          ok: false,
+          message: message.message ?? null,
+          error: message.message ?? String(message.error ?? 'The run failed'),
+          phase: message.phase ?? null,
+          errorType: message.errorType ?? null,
+          userLine: message.userLine ?? null,
+          trace: message.trace ?? null,
+          logs,
+        });
       }
     };
     worker.onerror = event => {

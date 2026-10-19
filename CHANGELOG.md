@@ -4,6 +4,17 @@ Notable changes to Pi for Android are documented here. Entries are grouped by re
 
 ## Unreleased
 
+- The sandbox runtimes answer with structure and honesty: a structured failure report — phase
+  (boot / install / execution), the interpreter's own error type and message, and the user-code
+  line when a frame proves one — instead of a Pyodide/WebAssembly traceback blob or a JS stack
+  exposing worker internals; the full internal trace rides in the result details as debugging
+  material. Both tools now render verified output records (path, bytes, SHA-256 checked against
+  the file system) in one identical `[outputs]` format regardless of interpreter. A
+  `sandbox_capabilities` tool reports what the sandboxes support and where their limits sit
+  (interpreter versions, package purity, the egress allowlist, size and timeout caps), assembled
+  from the enforced constants so the report cannot drift from enforcement. Lockfiles record the
+  runtime beside the dependencies (Pyodide and the WebView version), and a plain package name
+  reuses the last good lock's pin with no network round trip; explicit versions bypass the lock.
 - Python joins the JS sandbox, the same way: `py_resolve` pins an exact PyPI version (pure-wheel
   verdict included — py_search has no analogue because PyPI retired its search endpoint), and
   `py_run` boots Pyodide (CPython on WebAssembly, pinned at v0.26.2 from jsDelivr) in the SAME

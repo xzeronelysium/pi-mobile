@@ -96,15 +96,19 @@ class JsSandboxHostDeviceTest {
     }
     val host = sandbox()
     try {
-      // Keyed by absolute path, exactly the way NativeRuntimeHost hands the sources over.
+      // Keyed by absolute path exactly the way NativeRuntimeHost hands the sources over, plus the
+      // declared-as-written alias. Both must reach the same source — and whichever one the body
+      // imports, the module's own relative import of the helper must resolve to a served sibling.
       val code =
-        "return piModules[${JSONObject.quote(tools.absolutePath)}].quad(3);"
+        "const byAlias = piModules['tools.mod'].quad(2);\n" +
+        "return [byAlias, piModules[${JSONObject.quote(tools.absolutePath)}].quad(3)];"
       val result = host.run(
         "test-modules", code, JSONObject(), emptyList(), emptyList(), 20_000,
         mapOf(helper.absolutePath to helper.readText(), tools.absolutePath to tools.readText()),
+        mapOf("tools.mod" to tools.absolutePath),
       )
       assertEquals(result.toString(), true, result.optBoolean("ok"))
-      assertEquals(12, result.optInt("result"))
+      assertEquals("[8,12]", result.optJSONArray("result")?.toString())
     } finally {
       host.close()
       root.deleteRecursively()

@@ -52,7 +52,7 @@ internal class JsSandboxHost(private val context: Context) : Closeable {
     val config: JSONObject,
     val inputFiles: Map<String, File>,
     val outputFiles: Map<String, File>,
-    /** Module sources keyed by their declared module path (the URL lives under [modulePrefix]). */
+    /** Module sources keyed by their URL key — a module's own real directory plus its basename. */
     val moduleSources: Map<String, String>,
     val modulePrefix: String,
     val latch: CountDownLatch,
@@ -72,6 +72,10 @@ internal class JsSandboxHost(private val context: Context) : Closeable {
    * URL space, so the worker preloads them into `piModules[path]` and a module may import another
    * declared one with a plain relative specifier — real URLs, real module semantics — while a module
    * that was never declared answers 404.
+   *
+   * [moduleAliases] keys the same sources again under the path exactly as the tool call declared
+   * it, so the run body reads `piModules["lib/extract.mjs"]` without re-deriving the resolved
+   * absolute key.
    */
   fun run(
     requestId: String,
@@ -81,6 +85,7 @@ internal class JsSandboxHost(private val context: Context) : Closeable {
     outputs: List<File>,
     timeoutMs: Long,
     modules: Map<String, String> = emptyMap(),
+    moduleAliases: Map<String, String> = emptyMap(),
   ): JSONObject = synchronized(runLock) {
     if (closed) return@synchronized JSONObject().put("ok", false).put("error", "The JS sandbox is closed")
     val inputFiles = inputs.associateBy { it.absolutePath }
@@ -89,23 +94,38 @@ internal class JsSandboxHost(private val context: Context) : Closeable {
     // and a token the next run reuses could serve a stale source to a live import.
     val moduleToken = UUID.randomUUID().toString().take(8)
     val modulePrefix = "/$MODULE_URL_PATH/$moduleToken/"
+    // Two key layers. The URL keys (what interception matches and what a module's relative imports
+    // resolve against) keep every module's real directory — abs paths drop only their leading slash,
+    // so the token URL is one directory tree, and an alias replaces just the basename — otherwise a
+    // body importing `piModules["tools.mod"]` would import the same source from /w/<token>/ and its
+    // relative imports of declared siblings would 404. The piModules keys (what the body reads) are
+    // the abs path and the alias, both pointing at the same URL.
+    val sourcesByUrlKey = LinkedHashMap<String, String>()
+    val urlByKey = LinkedHashMap<String, String>()
+    for ((path, source) in modules) {
+      val urlKey = path.removePrefix("/")
+      sourcesByUrlKey[urlKey] = source
+      urlByKey[path] = "https://pi.local$modulePrefix${Uri.encode(urlKey, "/")}"
+    }
+    for ((alias, path) in moduleAliases) {
+      val source = modules[path] ?: continue
+      val base = path.removePrefix("/").substringBeforeLast('/', "")
+      val urlKey = "$base/$alias"
+      sourcesByUrlKey[urlKey] = source
+      urlByKey[alias] = "https://pi.local$modulePrefix${Uri.encode(urlKey, "/")}"
+    }
     val config = JSONObject()
       .put("requestId", requestId)
       .put("code", code)
       .put("imports", imports)
-      .put(
-        "modules",
-        JSONObject(modules.entries.associate { (path, _) ->
-          path to "https://pi.local$modulePrefix${Uri.encode(path, "/")}"
-        }),
-      )
+      .put("modules", JSONObject(urlByKey))
       .put("inputs", JSONArray(inputFiles.keys.toList()))
       .put("outputs", JSONArray(outputFiles.keys.toList()))
     val run = Run(
       config = config,
       inputFiles = inputFiles,
       outputFiles = outputFiles,
-      moduleSources = modules,
+      moduleSources = sourcesByUrlKey,
       modulePrefix = modulePrefix,
       latch = CountDownLatch(1),
       result = AtomicReference(),
@@ -214,13 +234,16 @@ internal class JsSandboxHost(private val context: Context) : Closeable {
     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
       val uri = request.url
       if (uri.host != "pi.local") return null
-      // Declared workspace modules of the active run, served as real ESM. The URL keys were built
-      // with `Uri.encode(path, "/")`, and `getPath()` returns the decoded form, so the comparison is
-      // against the raw source paths. An undeclared module is a 404, never a pass-through.
+      // Declared workspace modules of the active run, served as real ESM. The URL keys keep each
+      // module's directory (`/w/<token>/<abs path minus leading slash>`, aliases replacing only the
+      // basename), so a module's relative imports of declared siblings resolve to served URLs; the
+      // request path is the decoded form of exactly those keys. An undeclared module is a 404,
+      // never a pass-through.
       val path = uri.path
       active.get()?.let { run ->
         if (path != null && path.startsWith(run.modulePrefix)) {
-          val source = run.moduleSources[path.substringAfter(run.modulePrefix, "")]
+          val key = path.removePrefix(run.modulePrefix)
+          val source = run.moduleSources[key]
           if (source != null) {
             return WebResourceResponse("application/javascript", "UTF-8", source.byteInputStream())
           }

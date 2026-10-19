@@ -435,7 +435,8 @@ class NativeRuntimeHost(
       }
       val timeoutMs = args.optLong("timeoutMs", 60_000L).coerceIn(1L, 180_000L)
       val modules = moduleSources(args.optJSONArray("modules"))
-      val report = sandbox.run(requestId, code, imports, files("inputs"), files("outputs"), timeoutMs, modules)
+      val aliases = moduleAliases(args.optJSONArray("moduleAliases"), modules)
+      val report = sandbox.run(requestId, code, imports, files("inputs"), files("outputs"), timeoutMs, modules, aliases)
       // Only a successful run earns lockfile entries: a cancelled or timed-out run says nothing
       // about which module content was last good.
       if (report.optBoolean("ok") && modules.isNotEmpty()) {
@@ -576,6 +577,30 @@ class NativeRuntimeHost(
       }
     }
     return sources
+  }
+
+  /**
+   * The declared-as-written aliases for one run's modules, each pointing at the module source the
+   * alias shares. The tool resolves its declared paths onto absolute ones before they reach me (that
+   * is the confinement), so without the round trip the body would have to re-derive the absolute key
+   * the sandbox keys `piModules` with — a string rewrite the model can get wrong. With it, the body
+   * reaches `piModules["lib/extract.mjs"]` exactly as the tool call declared. An alias without a
+   * loaded module is a coded refusal rather than a KeyError deep in the sandbox.
+   */
+  private fun moduleAliases(array: JSONArray?, modules: Map<String, String>): Map<String, String> {
+    if (array == null || array.length() == 0) return emptyMap()
+    val aliases = LinkedHashMap<String, String>()
+    for (index in 0 until array.length()) {
+      val entry = array.optJSONObject(index) ?: continue
+      val declared = entry.optString("declared")
+      if (declared.isEmpty()) continue
+      val path = entry.optString("path")
+      if (!modules.containsKey(path)) {
+        throw NativeFailure("invalid", "Module alias has no loaded module: $declared")
+      }
+      aliases[declared] = path
+    }
+    return aliases
   }
 
   /** The lockfile-facing metadata for the modules one run loaded: path, content hash and size. */

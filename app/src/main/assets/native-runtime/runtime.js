@@ -70990,7 +70990,7 @@ ${command}` : command,
     }
     let searchTool = {
       name: JS_SEARCH_TOOL_NAME,
-      description: `Search the public JS package indexes the way npm does: npm registry and cdnjs. Use it to discover a browser library for a task (PDF, OCR, DOCX, XLSX, archives, etc.). Results are candidates, not guarantees: inspect one with ${JS_INFO_TOOL_NAME} before running it. npm packages that need Node built-ins or native binaries will not work in the sandbox. Known-good browser packages include pdfjs-dist (PDF text/render), pdf-lib (PDF create/edit), tesseract.js (OCR), mammoth (DOCX), SheetJS (XLSX) and jszip (archives); searching for the package name directly is often better than a broad capability phrase.`,
+      description: `Search the public JS package indexes the way npm does: npm registry and cdnjs. Use it to discover a browser library for a task (PDF, OCR, DOCX, XLSX, archives, etc.). Results are candidates, not guarantees: inspect one with ${JS_INFO_TOOL_NAME} before running it. npm packages that need Node built-ins or native binaries will not work in the sandbox. Known-good browser packages include pdfjs-dist (PDF text/render), pdf-lib (PDF create/edit), tesseract.js (OCR), mammoth (DOCX), SheetJS (XLSX) and jszip (archives); searching for the package name directly is often better than a broad capability phrase. Skip this tool when you already know the package name: go straight to ${JS_RESOLVE_TOOL_NAME}, or ${JS_INFO_TOOL_NAME} first when compatibility details matter.`,
       parameters: {
         type: "object",
         properties: {
@@ -71033,7 +71033,7 @@ ${command}` : command,
       }
     }, infoTool = {
       name: JS_INFO_TOOL_NAME,
-      description: `Inspect one npm or cdnjs package: version, license, size, browser entry points, dependencies, integrity and a browser-compatibility warning list. This is the check before ${JS_RESOLVE_TOOL_NAME} and ${JS_RUN_TOOL_NAME}.`,
+      description: `Inspect one npm or cdnjs package: version, license, size, browser entry points, dependencies, integrity and a browser-compatibility warning list. This is the check before ${JS_RESOLVE_TOOL_NAME} and ${JS_RUN_TOOL_NAME}. Skip it when you already know the exact version to use \u2014 ${JS_RESOLVE_TOOL_NAME} alone returns the URLs and integrity.`,
       parameters: {
         type: "object",
         properties: {
@@ -71068,7 +71068,7 @@ ${command}` : command,
       }
     }, resolveTool = {
       name: JS_RESOLVE_TOOL_NAME,
-      description: `Resolve a package name/range to an exact version and browser ESM URLs. Prefers esm.sh, with jsDelivr as a fallback, and cdnjs for classic libraries. Returns the integrity and browser warnings; ${JS_RUN_TOOL_NAME} uses the resolved URL.`,
+      description: `Resolve a package name/range to an exact version and browser ESM URLs. Prefers esm.sh, with jsDelivr as a fallback, and cdnjs for classic libraries. Returns the integrity and browser warnings; ${JS_RUN_TOOL_NAME}'s imports consume the resolved URL, which the run body then reaches as piImports[name].`,
       parameters: {
         type: "object",
         properties: {
@@ -71091,7 +71091,7 @@ ${command}` : command,
       }
     }, runTool = {
       name: JS_RUN_TOOL_NAME,
-      description: "Run JavaScript in the isolated JS sandbox. The sandbox has no app bridge: it exposes piImports (resolved packages), piModules (declared workspace modules loaded as real ESM, keyed by absolute path), piInputs (declared input files as Uint8Array, keyed by absolute path), piInputPaths (the same absolute paths as an array), piWrite(path, data) for declared output files, piOutputs (declared output absolute paths as an array), and console. Code is an async body, so await works. Imports are resolved from npm/cdnjs and loaded from esm.sh/jsDelivr. A workspace module is real ESM: it may import other declared modules with relative specifiers, but it cannot use bare package names \u2014 pass a piImports value into it from the body instead. Prefer modules over re-inlining code: write the module once with write, then declare it on every later run; the host hashes each module into .pi-js/lock.json. Declare every input and output; the host only allows those paths and writes a .pi-js/lock.json entry for every resolved package.",
+      description: `Run JavaScript in the isolated JS sandbox. The sandbox has no app bridge: it exposes piImports (resolved packages, keyed by package name), piModules (declared workspace modules as real ESM, keyed by the path exactly as declared in modules and also by its absolute path), piInputs (declared input files as Uint8Array, keyed by absolute path), piInputPaths (those absolute paths as an array), piWrite(path, data) for declared output files, piOutputs (those absolute paths as an array), and console. The body is an async body, so await works and the return value becomes the result. Two patterns: (1) one-shot \u2014 declare inputs/outputs and write the whole logic inline; (2) reuse \u2014 write an .mjs file with write, declare it in modules, and keep the body to 1-3 lines calling it; a module may import other declared modules with relative specifiers, but not bare package names \u2014 pass a piImports value in from the body. A successful run hashes each resolved package and loaded module into .pi-js/lock.json. Example one-shot with a package: imports:["jszip"], inputs:["notes.zip"], code:"return Object.keys((await piImports['jszip'].loadAsync(piInputs[piInputPaths[0]]))?.files ?? {}).slice(0, 20);" \u2014 reuse: modules:["lib/extract.mjs"], code:"return piModules['lib/extract.mjs'].run(piInputs, piWrite);"`,
       parameters: {
         type: "object",
         properties: {
@@ -71104,7 +71104,7 @@ ${command}` : command,
           modules: {
             type: "array",
             items: { type: "string" },
-            description: 'Workspace .mjs module paths to preload and expose as piModules["<abs path>"]. Modules are real ESM and may import each other with relative specifiers.'
+            description: 'Workspace .mjs module paths to preload and expose as piModules["<declared path>"]. Modules are real ESM and may import each other with relative specifiers.'
           },
           inputs: { type: "array", items: { type: "string" }, description: "Workspace files to expose in piInputs." },
           outputs: { type: "array", items: { type: "string" }, description: "Workspace files piWrite may create." },
@@ -71117,7 +71117,12 @@ ${command}` : command,
         let code = args?.code;
         if (typeof code != "string" || code.trim() === "") throw new JsToolError("invalid_code", "code is required");
         if (byteLength(code) > MAX_CODE_BYTES) throw new JsToolError("code_too_large", `code exceeds ${MAX_CODE_BYTES} bytes`);
-        let imports = stringArray(args?.imports, "imports", MAX_IMPORTS), modules = stringArray(args?.modules, "modules", MAX_MODULES), inputs = stringArray(args?.inputs, "inputs", MAX_FILES), outputs = stringArray(args?.outputs, "outputs", MAX_FILES), root = rootOf(), inputPaths = inputs.map((path4) => resolveInsideWorkspace(root, path4)), outputPaths = outputs.map((path4) => resolveInsideWorkspace(root, path4)), modulePaths = [...new Set(modules.map((path4) => resolveInsideWorkspace(root, path4)))], timeoutMs = args?.timeoutMs === void 0 ? DEFAULT_RUN_TIMEOUT_MS : Math.min(Math.max(Number(args.timeoutMs), 1), MAX_RUN_TIMEOUT_MS), resolved = [], importMap = {};
+        let imports = stringArray(args?.imports, "imports", MAX_IMPORTS), modules = stringArray(args?.modules, "modules", MAX_MODULES), inputs = stringArray(args?.inputs, "inputs", MAX_FILES), outputs = stringArray(args?.outputs, "outputs", MAX_FILES), root = rootOf(), inputPaths = inputs.map((path4) => resolveInsideWorkspace(root, path4)), outputPaths = outputs.map((path4) => resolveInsideWorkspace(root, path4)), declared = /* @__PURE__ */ new Map();
+        for (let name of modules) {
+          let path4 = resolveInsideWorkspace(root, name);
+          declared.has(path4) || declared.set(path4, name);
+        }
+        let modulePaths = [...declared.keys()], moduleAliases = [...declared].map(([path4, name]) => ({ declared: name, path: path4 })), timeoutMs = args?.timeoutMs === void 0 ? DEFAULT_RUN_TIMEOUT_MS : Math.min(Math.max(Number(args.timeoutMs), 1), MAX_RUN_TIMEOUT_MS), resolved = [], importMap = {};
         for (let spec of imports) {
           let parsed = parseImport(spec), info = await resolvePackage(parsed.name, parsed.version, void 0, void 0);
           resolved.push(info), importMap[parsed.name] = info.esm;
@@ -71137,6 +71142,7 @@ ${command}` : command,
             inputs: inputPaths,
             outputs: outputPaths,
             modules: modulePaths,
+            moduleAliases,
             timeoutMs,
             requestId: requestId3
           });

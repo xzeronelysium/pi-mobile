@@ -174,6 +174,7 @@ test('js_run resolves imports, passes declared paths to the sandbox and writes t
   assert.equal(run.args.code.includes('piModules'), true);
   assert.equal(run.args.imports['pdfjs-dist'], 'https://esm.sh/pdfjs-dist@4.0.379');
   assert.deepEqual(run.args.modules, ['/workspace/lib/tools.mjs']);
+  assert.deepEqual(run.args.moduleAliases, [{ declared: 'lib/tools.mjs', path: '/workspace/lib/tools.mjs' }]);
   assert.deepEqual(run.args.inputs, ['/workspace/doc.pdf']);
   assert.deepEqual(run.args.outputs, ['/workspace/out/page-1.png']);
   assert.equal(run.args.timeoutMs, 12_000);
@@ -201,6 +202,7 @@ test('js_run deduplicates workspace modules and refuses more than the cap', asyn
   await tool(JS_RUN_TOOL_NAME).execute({ code: 'return 1;', modules: ['lib/a.mjs', 'lib/a.mjs'] }, api(), {});
   const run = calls.find(call => call.op === 'js.run');
   assert.deepEqual(run.args.modules, ['/workspace/lib/a.mjs']);
+  assert.deepEqual(run.args.moduleAliases, [{ declared: 'lib/a.mjs', path: '/workspace/lib/a.mjs' }]);
 });
 
 test('a run without modules writes no lockfile module section', async () => {

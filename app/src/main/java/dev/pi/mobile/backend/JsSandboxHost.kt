@@ -2,6 +2,7 @@ package dev.pi.mobile.backend
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -17,6 +18,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.Closeable
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -50,6 +52,9 @@ internal class JsSandboxHost(private val context: Context) : Closeable {
     val config: JSONObject,
     val inputFiles: Map<String, File>,
     val outputFiles: Map<String, File>,
+    /** Module sources keyed by their declared module path (the URL lives under [modulePrefix]). */
+    val moduleSources: Map<String, String>,
+    val modulePrefix: String,
     val latch: CountDownLatch,
     val result: AtomicReference<JSONObject>,
   ) {
@@ -61,6 +66,12 @@ internal class JsSandboxHost(private val context: Context) : Closeable {
    * Run [code] with [imports] resolved to URLs. Serialized: one sandbox run at a time, so a second
    * call waits rather than creating a second WebView. Blocks the caller (the host's io worker) until
    * the worker reports, times out, or is cancelled. Never invoke on the main thread.
+   *
+   * [modules] carries declared workspace module sources, keyed by their workspace-relative path.
+   * They are served back as real ESM under this run's own `https://pi.local/w/<path-unique-token>/…`
+   * URL space, so the worker preloads them into `piModules[path]` and a module may import another
+   * declared one with a plain relative specifier — real URLs, real module semantics — while a module
+   * that was never declared answers 404.
    */
   fun run(
     requestId: String,
@@ -69,20 +80,33 @@ internal class JsSandboxHost(private val context: Context) : Closeable {
     inputs: List<File>,
     outputs: List<File>,
     timeoutMs: Long,
+    modules: Map<String, String> = emptyMap(),
   ): JSONObject = synchronized(runLock) {
     if (closed) return@synchronized JSONObject().put("ok", false).put("error", "The JS sandbox is closed")
     val inputFiles = inputs.associateBy { it.absolutePath }
     val outputFiles = outputs.associateBy { it.absolutePath }
+    // One token per run: the URL space is only ever meaningful to the run that declared the files,
+    // and a token the next run reuses could serve a stale source to a live import.
+    val moduleToken = UUID.randomUUID().toString().take(8)
+    val modulePrefix = "/$MODULE_URL_PATH/$moduleToken/"
     val config = JSONObject()
       .put("requestId", requestId)
       .put("code", code)
       .put("imports", imports)
+      .put(
+        "modules",
+        JSONObject(modules.entries.associate { (path, _) ->
+          path to "https://pi.local$modulePrefix${Uri.encode(path, "/")}"
+        }),
+      )
       .put("inputs", JSONArray(inputFiles.keys.toList()))
       .put("outputs", JSONArray(outputFiles.keys.toList()))
     val run = Run(
       config = config,
       inputFiles = inputFiles,
       outputFiles = outputFiles,
+      moduleSources = modules,
+      modulePrefix = modulePrefix,
       latch = CountDownLatch(1),
       result = AtomicReference(),
     )
@@ -190,6 +214,18 @@ internal class JsSandboxHost(private val context: Context) : Closeable {
     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
       val uri = request.url
       if (uri.host != "pi.local") return null
+      // Declared workspace modules of the active run, served as real ESM. The URL keys were built
+      // with `Uri.encode(path, "/")`, and `getPath()` returns the decoded form, so the comparison is
+      // against the raw source paths. An undeclared module is a 404, never a pass-through.
+      val path = uri.path
+      active.get()?.let { run ->
+        if (path != null && path.startsWith(run.modulePrefix)) {
+          val source = run.moduleSources[path.substringAfter(run.modulePrefix, "")]
+          if (source != null) {
+            return WebResourceResponse("application/javascript", "UTF-8", source.byteInputStream())
+          }
+        }
+      }
       return when (uri.path) {
         "/sandbox.html" -> asset("native-runtime/sandbox.html", "text/html")
         "/sandbox.js" -> asset("native-runtime/sandbox.js", "application/javascript")
@@ -259,6 +295,8 @@ internal class JsSandboxHost(private val context: Context) : Closeable {
   private companion object {
     const val SANDBOX_URL = "https://pi.local/sandbox.html"
     const val SANDBOX_TAG = "PiJsSandbox"
+    /** The URL path root under which a run's declared workspace modules are served. */
+    const val MODULE_URL_PATH = "w"
     const val LOAD_GRACE_MILLIS = 20_000L
     const val MAX_INPUT_BYTES = 32L * 1024 * 1024
     const val MAX_OUTPUT_BYTES = 32L * 1024 * 1024

@@ -96,7 +96,23 @@ self.onmessage = async event => {
 
     const piImports = {};
     for (const [name, url] of Object.entries(config.imports ?? {})) {
-      piImports[name] = await import(url);
+      try {
+        piImports[name] = await import(url);
+      } catch (error) {
+        throw new Error(`Package import failed: ${name}: ${error && (error.stack || error.message) || error}`);
+      }
+    }
+
+    // Declared workspace modules, served by the host page as real ESM under this run's own URL
+    // space. A module may import another declared one with a plain relative specifier; an undeclared
+    // one 404s, which surfaces here as a named module failure rather than a bare syntax error.
+    const piModules = {};
+    for (const [modulePath, moduleUrl] of Object.entries(config.modules ?? {})) {
+      try {
+        piModules[modulePath] = await import(moduleUrl);
+      } catch (error) {
+        throw new Error(`Workspace module failed to load: ${modulePath}: ${error && (error.stack || error.message) || error}`);
+      }
     }
 
     const piWrite = async (path, data) => {
@@ -109,11 +125,12 @@ self.onmessage = async event => {
 
     const body = `return (async () => {\n${config.code}\n})();`;
     const execute = new Function(
-      'piImports', 'piInputs', 'piInputPaths', 'piWrite', 'piOutputs', 'console',
+      'piModules', 'piImports', 'piInputs', 'piInputPaths', 'piWrite', 'piOutputs', 'console',
       'TextDecoder', 'TextEncoder', 'atob', 'btoa',
       body,
     );
     const result = await execute(
+      piModules,
       piImports,
       piInputs,
       config.inputs ?? [],

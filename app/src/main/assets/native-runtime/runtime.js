@@ -70711,7 +70711,7 @@ ${command}` : command,
 
   // src/js-tools.mjs
   init_buffer();
-  var JS_SEARCH_TOOL_NAME = "js_search", JS_INFO_TOOL_NAME = "js_info", JS_RESOLVE_TOOL_NAME = "js_resolve", JS_RUN_TOOL_NAME = "js_run", JS_EXTENSION_NAME = "js-sandbox", NPM_REGISTRY = "https://registry.npmjs.org", NPM_SEARCH = "https://registry.npmjs.org/-/v1/search", JSDELIVR_CDN = "https://cdn.jsdelivr.net/npm", ESM_SH = "https://esm.sh", UNPKG = "https://unpkg.com", CDNJS_API = "https://api.cdnjs.com/libraries", JS_LOCK_PATH = ".pi-js/lock.json", MAX_CODE_BYTES = 256 * 1024, MAX_RESULT_BYTES = 256 * 1024, MAX_IMPORTS = 12, MAX_FILES = 20, DEFAULT_RUN_TIMEOUT_MS = 6e4, MAX_RUN_TIMEOUT_MS = 18e4, JsToolError = class extends Error {
+  var JS_SEARCH_TOOL_NAME = "js_search", JS_INFO_TOOL_NAME = "js_info", JS_RESOLVE_TOOL_NAME = "js_resolve", JS_RUN_TOOL_NAME = "js_run", JS_EXTENSION_NAME = "js-sandbox", NPM_REGISTRY = "https://registry.npmjs.org", NPM_SEARCH = "https://registry.npmjs.org/-/v1/search", JSDELIVR_CDN = "https://cdn.jsdelivr.net/npm", ESM_SH = "https://esm.sh", UNPKG = "https://unpkg.com", CDNJS_API = "https://api.cdnjs.com/libraries", JS_LOCK_PATH = ".pi-js/lock.json", MAX_CODE_BYTES = 256 * 1024, MAX_RESULT_BYTES = 256 * 1024, MAX_IMPORTS = 12, MAX_FILES = 20, MAX_MODULES = 12, DEFAULT_RUN_TIMEOUT_MS = 6e4, MAX_RUN_TIMEOUT_MS = 18e4, JsToolError = class extends Error {
     constructor(code, message3, cause) {
       super(message3), this.name = "JsToolError", this.code = code, cause !== void 0 && (this.cause = cause);
     }
@@ -70946,7 +70946,7 @@ ${command}` : command,
         };
       }
     }
-    async function writeLock(imports, context2) {
+    async function writeLock(imports, moduleReports, context2) {
       let path4 = resolveInsideWorkspace(rootOf(), JS_LOCK_PATH), existing = {};
       try {
         let raw = await call("file.read", { path: path4 });
@@ -70964,10 +70964,18 @@ ${command}` : command,
           license: entry.license,
           browserCompatible: entry.browserCompatible
         };
+      let modules = { ...existing.modules ?? {} };
+      for (let module of moduleReports ?? [])
+        typeof module?.path != "string" || module.path === "" || (modules[module.path] = {
+          path: module.path,
+          sha256: typeof module.sha256 == "string" ? module.sha256 : null,
+          bytes: Number.isFinite(module?.bytes) ? module.bytes : null
+        });
       let value = {
         version: 1,
         updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        packages
+        packages,
+        ...Object.keys(modules).length > 0 ? { modules } : {}
       };
       try {
         return await call("file.write", { path: path4, text: `${JSON.stringify(value, null, 2)}
@@ -71083,15 +71091,20 @@ ${command}` : command,
       }
     }, runTool = {
       name: JS_RUN_TOOL_NAME,
-      description: "Run JavaScript in the isolated JS sandbox. The sandbox has no app bridge: it exposes piImports (resolved packages), piInputs (declared input files as Uint8Array, keyed by absolute path), piInputPaths (the same absolute paths as an array), piWrite(path, data) for declared output files, piOutputs (declared output absolute paths as an array), and console. Code is an async body, so await works. Imports are resolved from npm/cdnjs and loaded from esm.sh/jsDelivr. Declare every input and output; the host only allows those paths and writes a .pi-js/lock.json entry for every resolved package.",
+      description: "Run JavaScript in the isolated JS sandbox. The sandbox has no app bridge: it exposes piImports (resolved packages), piModules (declared workspace modules loaded as real ESM, keyed by absolute path), piInputs (declared input files as Uint8Array, keyed by absolute path), piInputPaths (the same absolute paths as an array), piWrite(path, data) for declared output files, piOutputs (declared output absolute paths as an array), and console. Code is an async body, so await works. Imports are resolved from npm/cdnjs and loaded from esm.sh/jsDelivr. A workspace module is real ESM: it may import other declared modules with relative specifiers, but it cannot use bare package names \u2014 pass a piImports value into it from the body instead. Prefer modules over re-inlining code: write the module once with write, then declare it on every later run; the host hashes each module into .pi-js/lock.json. Declare every input and output; the host only allows those paths and writes a .pi-js/lock.json entry for every resolved package.",
       parameters: {
         type: "object",
         properties: {
-          code: { type: "string", description: "JavaScript async body. Use piImports, piInputs, piWrite, console." },
+          code: { type: "string", description: "JavaScript async body. Use piModules, piImports, piInputs, piWrite, console." },
           imports: {
             type: "array",
             items: { type: "string" },
             description: "Package names (or name@version) to resolve and expose as piImports[name]."
+          },
+          modules: {
+            type: "array",
+            items: { type: "string" },
+            description: 'Workspace .mjs module paths to preload and expose as piModules["<abs path>"]. Modules are real ESM and may import each other with relative specifiers.'
           },
           inputs: { type: "array", items: { type: "string" }, description: "Workspace files to expose in piInputs." },
           outputs: { type: "array", items: { type: "string" }, description: "Workspace files piWrite may create." },
@@ -71104,7 +71117,7 @@ ${command}` : command,
         let code = args?.code;
         if (typeof code != "string" || code.trim() === "") throw new JsToolError("invalid_code", "code is required");
         if (byteLength(code) > MAX_CODE_BYTES) throw new JsToolError("code_too_large", `code exceeds ${MAX_CODE_BYTES} bytes`);
-        let imports = stringArray(args?.imports, "imports", MAX_IMPORTS), inputs = stringArray(args?.inputs, "inputs", MAX_FILES), outputs = stringArray(args?.outputs, "outputs", MAX_FILES), root = rootOf(), inputPaths = inputs.map((path4) => resolveInsideWorkspace(root, path4)), outputPaths = outputs.map((path4) => resolveInsideWorkspace(root, path4)), timeoutMs = args?.timeoutMs === void 0 ? DEFAULT_RUN_TIMEOUT_MS : Math.min(Math.max(Number(args.timeoutMs), 1), MAX_RUN_TIMEOUT_MS), resolved = [], importMap = {};
+        let imports = stringArray(args?.imports, "imports", MAX_IMPORTS), modules = stringArray(args?.modules, "modules", MAX_MODULES), inputs = stringArray(args?.inputs, "inputs", MAX_FILES), outputs = stringArray(args?.outputs, "outputs", MAX_FILES), root = rootOf(), inputPaths = inputs.map((path4) => resolveInsideWorkspace(root, path4)), outputPaths = outputs.map((path4) => resolveInsideWorkspace(root, path4)), modulePaths = [...new Set(modules.map((path4) => resolveInsideWorkspace(root, path4)))], timeoutMs = args?.timeoutMs === void 0 ? DEFAULT_RUN_TIMEOUT_MS : Math.min(Math.max(Number(args.timeoutMs), 1), MAX_RUN_TIMEOUT_MS), resolved = [], importMap = {};
         for (let spec of imports) {
           let parsed = parseImport(spec), info = await resolvePackage(parsed.name, parsed.version, void 0, void 0);
           resolved.push(info), importMap[parsed.name] = info.esm;
@@ -71123,6 +71136,7 @@ ${command}` : command,
             imports: importMap,
             inputs: inputPaths,
             outputs: outputPaths,
+            modules: modulePaths,
             timeoutMs,
             requestId: requestId3
           });
@@ -71135,8 +71149,12 @@ ${command}` : command,
         if (value?.timedOut === !0) throw new JsToolError("timeout", `The JS run timed out after ${timeoutMs} ms`);
         if (value?.ok !== !0)
           throw new JsToolError("sandbox_error", textOf(value?.error) || "The JS sandbox failed without an error");
-        let lockPath = await writeLock(resolved, { api }), logs = Array.isArray(value.logs) ? value.logs.map((entry) => String(entry)).slice(0, 200) : [], resultText = value.result === void 0 ? "" : safeJson(value.result), blocks = [];
-        return logs.length > 0 && blocks.push(`[logs]
+        let moduleReports = (Array.isArray(value.modules) ? value.modules : []).filter(
+          (module) => module !== null && typeof module == "object"
+        ), lockPath = await writeLock(resolved, moduleReports, { api }), logs = Array.isArray(value.logs) ? value.logs.map((entry) => String(entry)).slice(0, 200) : [], resultText = value.result === void 0 ? "" : safeJson(value.result), blocks = [];
+        return moduleReports.length > 0 && blocks.push(`[modules]
+${moduleReports.map((module) => `${module.path}${typeof module.sha256 == "string" ? ` ${module.sha256}` : ""}`).join(`
+`)}`), logs.length > 0 && blocks.push(`[logs]
 ${truncate2(logs.join(`
 `))}`), resultText !== "" && resultText !== "null" && blocks.push(`[result]
 ${resultText}`), Array.isArray(value.outputs) && value.outputs.length > 0 && blocks.push(`[outputs]
@@ -71156,6 +71174,7 @@ ${lockPath}`), {
               license: entry.license,
               browserCompatible: entry.browserCompatible
             })),
+            modules: moduleReports,
             inputs: inputPaths,
             outputs: outputPaths,
             logs,

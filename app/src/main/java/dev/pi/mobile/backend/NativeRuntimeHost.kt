@@ -18,6 +18,7 @@ import org.json.JSONObject
 import java.io.Closeable
 import java.io.File
 import java.net.BindException
+import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
@@ -416,7 +417,9 @@ class NativeRuntimeHost(
     // enforces cannot drift. The host is the owner because the host is what enforces them.
     "shell.capabilities" -> ShellLimits.advertise()
     // One isolated JS run. The sandbox WebView has no Pi bridge; only declared inputs/outputs cross
-    // this boundary, and the result is the sandbox's own report.
+    // this boundary, and the result is the sandbox's own report. Declared workspace modules are
+    // read here — confined like an input — and served back to the sandbox under the run's own
+    // token, so the run's code reuse comes from real workspace files instead of inlined strings.
     "js.run" -> {
       val requestId = args.optString("requestId").ifBlank { java.util.UUID.randomUUID().toString() }
       val code = args.optString("code")
@@ -431,7 +434,14 @@ class NativeRuntimeHost(
         }
       }
       val timeoutMs = args.optLong("timeoutMs", 60_000L).coerceIn(1L, 180_000L)
-      sandbox.run(requestId, code, imports, files("inputs"), files("outputs"), timeoutMs)
+      val modules = moduleSources(args.optJSONArray("modules"))
+      val report = sandbox.run(requestId, code, imports, files("inputs"), files("outputs"), timeoutMs, modules)
+      // Only a successful run earns lockfile entries: a cancelled or timed-out run says nothing
+      // about which module content was last good.
+      if (report.optBoolean("ok") && modules.isNotEmpty()) {
+        report.put("modules", moduleMetadata(modules))
+      }
+      report
     }
     "js.cancel" -> { sandbox.cancel(args.getString("requestId")); null }
     // Provider HTTP. Capabilities is how the JS transport decides it can route here at all; a build
@@ -535,6 +545,57 @@ class NativeRuntimeHost(
   }
 
   /**
+   * Read the workspace module sources one `js.run` declared, keyed by absolute file path — the same
+   * keying `piInputs` uses, which keeps the sandbox's `piModules` keys and the metadata the JS tool
+   * reads unambiguous.
+   *
+   * Each declared path is confined exactly like an input, so a module can never point outside an
+   * allowed root, and the sources are size-capped — one oversized module is a coded refusal, not a
+   * truncated run whose imports silently disagree with the files — before any WebView starts.
+   */
+  private fun moduleSources(array: JSONArray?): Map<String, String> {
+    if (array == null || array.length() == 0) return emptyMap()
+    if (array.length() > MAX_MODULES) {
+      throw NativeFailure("too_many", "A run may load at most $MAX_MODULES workspace modules")
+    }
+    val sources = LinkedHashMap<String, String>()
+    var total = 0L
+    for (index in 0 until array.length()) {
+      val declared = array.getString(index)
+      val routed = io.confine(declared)
+      val file = File(routed.root, routed.path)
+      val path = file.absolutePath
+      if (!file.isFile) throw NativeFailure("not_found", "Workspace module is not readable: $declared")
+      if (file.length() > MAX_MODULE_BYTES) {
+        throw NativeFailure("too_large", "Workspace module exceeds $MAX_MODULE_BYTES bytes: $declared")
+      }
+      sources[path] = file.readText()
+      total += file.length()
+      if (total > MAX_MODULES_TOTAL_BYTES) {
+        throw NativeFailure("too_large", "Workspace modules exceed the $MAX_MODULES_TOTAL_BYTES-byte run budget")
+      }
+    }
+    return sources
+  }
+
+  /** The lockfile-facing metadata for the modules one run loaded: path, content hash and size. */
+  private fun moduleMetadata(modules: Map<String, String>): JSONArray {
+    val array = JSONArray()
+    for ((path, source) in modules) {
+      val digest = MessageDigest.getInstance("SHA-256")
+        .digest(source.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+      array.put(
+        JSONObject()
+          .put("path", path)
+          .put("sha256", digest)
+          .put("bytes", source.toByteArray(Charsets.UTF_8).size),
+      )
+    }
+    return array
+  }
+
+  /**
    * Start the teardown, in the order [RuntimeTeardown] fixes: the runtime is asked to close itself
    * (`window.PiNative.close()`), gets a bounded drain window to finish, and only then are the native
    * side and the WebView released.
@@ -625,6 +686,15 @@ class NativeRuntimeHost(
 
     /** How often a long-lived runtime re-applies the policy (6 h). */
     const val TEMP_PRUNE_INTERVAL_MILLIS: Long = 6L * 60L * 60L * 1000L
+
+    /** Cap on how many workspace modules one `js.run` may declare. */
+    const val MAX_MODULES = 12
+
+    /** Cap on one workspace module's source size, in bytes. */
+    const val MAX_MODULE_BYTES: Long = 256L * 1024L
+
+    /** Cap on the total module source a single run loads, in bytes. */
+    const val MAX_MODULES_TOTAL_BYTES: Long = 1024L * 1024L
   }
 }
 

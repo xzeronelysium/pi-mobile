@@ -100,7 +100,7 @@ The APK is created at `app/build/outputs/apk/release/app-release.apk`. Update `v
 
 - **Broad storage permission:** the app declares `MANAGE_EXTERNAL_STORAGE` for workspace access. This is sensitive and subject to Android/Google Play policy. Review it before granting access; Play distribution may require a policy-compliant alternative.
 - **Shell is not a sandbox:** commands run through Android's `/system/bin/sh` using the app's UID. File tools apply workspace path rules, but those rules do not confine the shell process.
-- **JavaScript packages are untrusted:** `js_run` executes package code in a separate WebView Worker without the Android bridge and exposes only declared input/output paths. This limits access; it does not make arbitrary packages trustworthy.
+- **JavaScript packages are untrusted:** `js_run` executes package code in a separate WebView Worker without the Android bridge and exposes only declared input/output paths. Declared workspace modules (`piModules`) are served into that same Worker as code with no more trust than the run itself; the host hashes each into `.pi-js/lock.json`. This limits access; it does not make arbitrary packages trustworthy.
 - **Credential handling:** provider credentials use Android Keystore-backed protection. Never commit credentials, signing keys, `local.properties`, or private user data.
 
 See [NOTICE](NOTICE) for third-party notices and licensing. The project is available under the [MIT License](LICENSE). For questions, see [SUPPORT.md](SUPPORT.md); for private vulnerability reports, see [SECURITY.md](SECURITY.md).

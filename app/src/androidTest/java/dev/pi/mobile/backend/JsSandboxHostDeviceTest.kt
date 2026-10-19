@@ -88,6 +88,50 @@ class JsSandboxHostDeviceTest {
     }
   }
 
+  @Test fun loadsWorkspaceModulesAsRealEsmWithRelativeImports() {
+    val root = File(ApplicationProvider.getApplicationContext<Context>().cacheDir, "js-sandbox-${UUID.randomUUID()}").apply { mkdirs() }
+    val helper = File(root, "sandbox-mod-helper.mjs").apply { writeText("export const double = value => value * 2;") }
+    val tools = File(root, "sandbox-mod-tools.mjs").apply {
+      writeText("import { double } from './sandbox-mod-helper.mjs';\nexport const quad = value => double(double(value));")
+    }
+    val host = sandbox()
+    try {
+      // Keyed by absolute path, exactly the way NativeRuntimeHost hands the sources over.
+      val code =
+        "return piModules[${JSONObject.quote(tools.absolutePath)}].quad(3);"
+      val result = host.run(
+        "test-modules", code, JSONObject(), emptyList(), emptyList(), 20_000,
+        mapOf(helper.absolutePath to helper.readText(), tools.absolutePath to tools.readText()),
+      )
+      assertEquals(result.toString(), true, result.optBoolean("ok"))
+      assertEquals(12, result.optInt("result"))
+    } finally {
+      host.close()
+      root.deleteRecursively()
+    }
+  }
+
+  @Test fun anUndeclaredModuleImportFailsTheRunWithAModuleName() {
+    val root = File(ApplicationProvider.getApplicationContext<Context>().cacheDir, "js-sandbox-${UUID.randomUUID()}").apply { mkdirs() }
+    val tools = File(root, "sandbox-mod-missing.mjs").apply {
+      writeText("import './sandbox-mod-absent.mjs';\nexport const x = 1;")
+    }
+    val host = sandbox()
+    try {
+      val code = "return piModules[${JSONObject.quote(tools.absolutePath)}].x;"
+      val result = host.run(
+        "test-modules-missing", code, JSONObject(), emptyList(), emptyList(), 20_000,
+        mapOf(tools.absolutePath to tools.readText()),
+      )
+      assertEquals(result.toString(), false, result.optBoolean("ok"))
+      assertTrue(result.optString("error").contains("Workspace module failed to load"))
+      assertTrue(result.optString("error").contains(tools.absolutePath))
+    } finally {
+      host.close()
+      root.deleteRecursively()
+    }
+  }
+
   @Test fun importsAnEsmPackageFromTheCdnInsideTheWorker() {
     val host = sandbox()
     try {

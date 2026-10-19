@@ -173,7 +173,7 @@ test('the packaged asset is byte-for-byte what the current source builds', async
     assert.ok(fresh.length > 0, 'the build produced an empty bundle');
     assert.equal(
       digest(fresh),
-      '1064cc3fd0d52d496e71f4f86035d0c87df8af3ea742d29328d7ed77dea55ef5',
+      '49ea14a300b0f8f13657e43d53e5681621edac49fc3b32771eacde451a8ea875',
       'the runtime build changed; rebuild app/src/main/assets/native-runtime/runtime.js',
     );
     const shipped = await readFile(SHIPPED_BUNDLE);
@@ -181,6 +181,7 @@ test('the packaged asset is byte-for-byte what the current source builds', async
     assert.equal(shipped.includes('run_script'), true, 'the packaged asset predates the script runner');
     assert.equal(shipped.includes('flow_checkpoints'), true, 'the packaged asset predates the flow layer');
     assert.equal(shipped.includes('pi-flow-probe.sh'), true, 'and the example flow it can run');
+    assert.equal(shipped.includes('piModules'), true, 'the packaged asset predates workspace module loading');
   } finally {
     await rm(scratch, { force: true });
   }

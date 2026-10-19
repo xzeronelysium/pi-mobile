@@ -4,6 +4,11 @@ Notable changes to Pi for Android are documented here. Entries are grouped by re
 
 ## Unreleased
 
+- `js_run` gains workspace modules: the agent writes reusable `.mjs` files into the workspace and
+  declares them, and the run body reaches them as `piModules` — real ESM that may import other
+  declared modules with relative specifiers. The sandbox serves them under a per-run token URL with
+  no bridge access, refuses undeclared ones by name, and hashes each loaded module into
+  `.pi-js/lock.json` so reused code is auditable across runs.
 - Add a left-edge workspace file drawer: browse the bound workspace with breadcrumbs and a
   per-folder filter, preview Markdown, code, text and images inline, attach any file to the prompt,
   copy its absolute path, or hand it to another app through a read-only FileProvider grant.

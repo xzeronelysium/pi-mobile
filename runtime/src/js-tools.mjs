@@ -38,6 +38,8 @@ export const MAX_CODE_BYTES = 256 * 1024;
 export const MAX_RESULT_BYTES = 256 * 1024;
 export const MAX_IMPORTS = 12;
 export const MAX_FILES = 20;
+/** Workspace modules one run may preload; each is bounded on the host side. */
+export const MAX_MODULES = 12;
 export const DEFAULT_RUN_TIMEOUT_MS = 60_000;
 export const MAX_RUN_TIMEOUT_MS = 180_000;
 
@@ -368,7 +370,7 @@ export function createJsTools({ transport, call, workspaceRoot } = {}) {
     }
   }
 
-  async function writeLock(imports, context) {
+  async function writeLock(imports, moduleReports, context) {
     const path = resolveInsideWorkspace(rootOf(), JS_LOCK_PATH);
     let existing = {};
     try {
@@ -387,10 +389,22 @@ export function createJsTools({ transport, call, workspaceRoot } = {}) {
         browserCompatible: entry.browserCompatible,
       };
     }
+    // Workspace modules the run loaded, hashed by the host: this is what makes the reused code
+    // auditable — a later run sees exactly which content was part of the last good lock.
+    const modules = { ...(existing.modules ?? {}) };
+    for (const module of moduleReports ?? []) {
+      if (typeof module?.path !== 'string' || module.path === '') continue;
+      modules[module.path] = {
+        path: module.path,
+        sha256: typeof module.sha256 === 'string' ? module.sha256 : null,
+        bytes: Number.isFinite(module?.bytes) ? module.bytes : null,
+      };
+    }
     const value = {
       version: 1,
       updatedAt: new Date().toISOString(),
       packages,
+      ...(Object.keys(modules).length > 0 ? { modules } : {}),
     };
     try {
       await call('file.write', { path, text: `${JSON.stringify(value, null, 2)}\n` });
@@ -530,19 +544,30 @@ export function createJsTools({ transport, call, workspaceRoot } = {}) {
   const runTool = defineTool({
     name: JS_RUN_TOOL_NAME,
     description: `Run JavaScript in the isolated JS sandbox. The sandbox has no app bridge: it exposes `
-      + `piImports (resolved packages), piInputs (declared input files as Uint8Array, keyed by absolute path), `
+      + `piImports (resolved packages), piModules (declared workspace modules loaded as real ESM, keyed by absolute path), `
+      + `piInputs (declared input files as Uint8Array, keyed by absolute path), `
       + `piInputPaths (the same absolute paths as an array), piWrite(path, data) for declared output files, `
       + `piOutputs (declared output absolute paths as an array), and console. Code is an async body, so await `
-      + `works. Imports are resolved from npm/cdnjs and loaded from esm.sh/jsDelivr. Declare every input and `
-      + `output; the host only allows those paths and writes a .pi-js/lock.json entry for every resolved package.`,
+      + `works. Imports are resolved from npm/cdnjs and loaded from esm.sh/jsDelivr. A workspace module is real ESM: `
+      + `it may import other declared modules with relative specifiers, but it cannot use bare package names — `
+      + `pass a piImports value into it from the body instead. Prefer modules over re-inlining code: write the `
+      + `module once with write, then declare it on every later run; the host hashes each module into `
+      + `.pi-js/lock.json. Declare every input and output; the host only allows those paths and writes a `
+      + `.pi-js/lock.json entry for every resolved package.`,
     parameters: {
       type: 'object',
       properties: {
-        code: { type: 'string', description: 'JavaScript async body. Use piImports, piInputs, piWrite, console.' },
+        code: { type: 'string', description: 'JavaScript async body. Use piModules, piImports, piInputs, piWrite, console.' },
         imports: {
           type: 'array',
           items: { type: 'string' },
           description: 'Package names (or name@version) to resolve and expose as piImports[name].',
+        },
+        modules: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Workspace .mjs module paths to preload and expose as piModules["<abs path>"]. '
+            + 'Modules are real ESM and may import each other with relative specifiers.',
         },
         inputs: { type: 'array', items: { type: 'string' }, description: 'Workspace files to expose in piInputs.' },
         outputs: { type: 'array', items: { type: 'string' }, description: 'Workspace files piWrite may create.' },
@@ -556,11 +581,14 @@ export function createJsTools({ transport, call, workspaceRoot } = {}) {
       if (typeof code !== 'string' || code.trim() === '') throw new JsToolError('invalid_code', 'code is required');
       if (byteLength(code) > MAX_CODE_BYTES) throw new JsToolError('code_too_large', `code exceeds ${MAX_CODE_BYTES} bytes`);
       const imports = stringArray(args?.imports, 'imports', MAX_IMPORTS);
+      const modules = stringArray(args?.modules, 'modules', MAX_MODULES);
       const inputs = stringArray(args?.inputs, 'inputs', MAX_FILES);
       const outputs = stringArray(args?.outputs, 'outputs', MAX_FILES);
       const root = rootOf();
       const inputPaths = inputs.map(path => resolveInsideWorkspace(root, path));
       const outputPaths = outputs.map(path => resolveInsideWorkspace(root, path));
+      // A module declared twice is one module; order is kept, so the lockfile is stable across runs.
+      const modulePaths = [...new Set(modules.map(path => resolveInsideWorkspace(root, path)))];
       const timeoutMs = args?.timeoutMs === undefined
         ? DEFAULT_RUN_TIMEOUT_MS
         : Math.min(Math.max(Number(args.timeoutMs), 1), MAX_RUN_TIMEOUT_MS);
@@ -588,6 +616,7 @@ export function createJsTools({ transport, call, workspaceRoot } = {}) {
           imports: importMap,
           inputs: inputPaths,
           outputs: outputPaths,
+          modules: modulePaths,
           timeoutMs,
           requestId,
         });
@@ -604,10 +633,16 @@ export function createJsTools({ transport, call, workspaceRoot } = {}) {
         throw new JsToolError('sandbox_error', textOf(value?.error) || 'The JS sandbox failed without an error');
       }
 
-      const lockPath = await writeLock(resolved, { api });
+      const moduleReports = (Array.isArray(value.modules) ? value.modules : []).filter(
+        module => module !== null && typeof module === 'object',
+      );
+      const lockPath = await writeLock(resolved, moduleReports, { api });
       const logs = Array.isArray(value.logs) ? value.logs.map(entry => String(entry)).slice(0, 200) : [];
       const resultText = value.result === undefined ? '' : safeJson(value.result);
       const blocks = [];
+      if (moduleReports.length > 0) {
+        blocks.push(`[modules]\n${moduleReports.map(module => `${module.path}${typeof module.sha256 === 'string' ? ` ${module.sha256}` : ''}`).join('\n')}`);
+      }
       if (logs.length > 0) blocks.push(`[logs]\n${truncate(logs.join('\n'))}`);
       if (resultText !== '' && resultText !== 'null') blocks.push(`[result]\n${resultText}`);
       if (Array.isArray(value.outputs) && value.outputs.length > 0) blocks.push(`[outputs]\n${value.outputs.join('\n')}`);
@@ -626,6 +661,7 @@ export function createJsTools({ transport, call, workspaceRoot } = {}) {
             license: entry.license,
             browserCompatible: entry.browserCompatible,
           })),
+          modules: moduleReports,
           inputs: inputPaths,
           outputs: outputPaths,
           logs,

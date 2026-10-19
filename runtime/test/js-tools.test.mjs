@@ -84,7 +84,12 @@ function createHarness({ npm = NPM_DOC, npmStatus = 200, cdnjs = [], run } = {})
   const bridge = async (op, args = {}) => {
     calls.push({ op, args });
     if (op === 'js.run') {
-      return run === undefined ? { ok: true, result: { pages: 2 }, logs: ['log: ok'], outputs: args.outputs } : run;
+      return run === undefined
+        ? {
+            ok: true, result: { pages: 2 }, logs: ['log: ok'], outputs: args.outputs,
+            modules: (args.modules ?? []).map(path => ({ path, sha256: `sha-${path}`, bytes: 5 })),
+          }
+        : run;
     }
     if (op === 'js.cancel') return null;
     if (op === 'file.read') return '';
@@ -158,15 +163,17 @@ test('a cdnjs-only package falls back to the cdnjs index', async () => {
 test('js_run resolves imports, passes declared paths to the sandbox and writes the lockfile', async () => {
   const { tool, calls } = createHarness();
   const result = await tool(JS_RUN_TOOL_NAME).execute({
-    code: 'return piImports["pdfjs-dist"].version;',
+    code: 'return piModules[tools].quad(3);',
     imports: ['pdfjs-dist'],
+    modules: ['lib/tools.mjs'],
     inputs: ['doc.pdf'],
     outputs: ['out/page-1.png'],
     timeoutMs: 12_000,
   }, api(), {});
   const run = calls.find(call => call.op === 'js.run');
-  assert.equal(run.args.code.includes('piImports'), true);
+  assert.equal(run.args.code.includes('piModules'), true);
   assert.equal(run.args.imports['pdfjs-dist'], 'https://esm.sh/pdfjs-dist@4.0.379');
+  assert.deepEqual(run.args.modules, ['/workspace/lib/tools.mjs']);
   assert.deepEqual(run.args.inputs, ['/workspace/doc.pdf']);
   assert.deepEqual(run.args.outputs, ['/workspace/out/page-1.png']);
   assert.equal(run.args.timeoutMs, 12_000);
@@ -176,8 +183,31 @@ test('js_run resolves imports, passes declared paths to the sandbox and writes t
   const parsed = JSON.parse(lock.args.text);
   assert.equal(parsed.packages['pdfjs-dist'].version, '4.0.379');
   assert.equal(parsed.packages['pdfjs-dist'].integrity, 'sha512-new');
+  assert.equal(parsed.modules['/workspace/lib/tools.mjs'].sha256, 'sha-/workspace/lib/tools.mjs');
   assert.match(result.content[0].text, /pages/);
+  assert.match(result.content[0].text, /\[modules\][\s\S]*lib\/tools\.mjs/);
   assert.equal(result.details.lockPath, '/workspace/.pi-js/lock.json');
+  assert.deepEqual(result.details.modules[0].sha256, 'sha-/workspace/lib/tools.mjs');
+});
+
+test('js_run deduplicates workspace modules and refuses more than the cap', async () => {
+  const { tool, calls } = createHarness();
+  const tooMany = Array.from({ length: 13 }, (_, index) => `m${index}.mjs`);
+  await assert.rejects(tool(JS_RUN_TOOL_NAME).execute({ code: 'return 1;', modules: tooMany }, api(), {}), error => {
+    assert.equal(error.code, 'invalid_arguments');
+    assert.match(error.message, /modules may hold at most 12 entries/);
+    return true;
+  });
+  await tool(JS_RUN_TOOL_NAME).execute({ code: 'return 1;', modules: ['lib/a.mjs', 'lib/a.mjs'] }, api(), {});
+  const run = calls.find(call => call.op === 'js.run');
+  assert.deepEqual(run.args.modules, ['/workspace/lib/a.mjs']);
+});
+
+test('a run without modules writes no lockfile module section', async () => {
+  const { tool, calls } = createHarness();
+  await tool(JS_RUN_TOOL_NAME).execute({ code: 'return piImports["pdfjs-dist"].version;' , imports: ['pdfjs-dist'] }, api(), {});
+  const lock = JSON.parse(calls.find(call => call.op === 'file.write').args.text);
+  assert.equal(lock.modules, undefined);
 });
 
 test('an already-aborted context never starts the sandbox', async () => {

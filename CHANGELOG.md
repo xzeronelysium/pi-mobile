@@ -30,6 +30,10 @@ Notable changes to Pi for Android are documented here. Entries are grouped by re
   exactly as declared (URL files keep their real directory, aliases replace only the basename) and
   also by its resolved absolute path; the tool descriptions now teach the one-shot/reuse patterns
   with working examples.
+
+## 1.1.0 — 2026-10-18
+
+- Update application version to 1.1.0 (version code 2).
 - Add a left-edge workspace file drawer: browse the bound workspace with breadcrumbs and a
   per-folder filter, preview Markdown, code, text and images inline, attach any file to the prompt,
   copy its absolute path, or hand it to another app through a read-only FileProvider grant.
@@ -43,6 +47,11 @@ Notable changes to Pi for Android are documented here. Entries are grouped by re
   colouring, a copy action, horizontal scrolling and long-block collapsing.
 - Refresh the README with real device screenshots, current capabilities, build steps, and security notes.
 - Expand the architecture guide with the current native-host and runtime boundaries.
+- Improve settings search and persist model preferences and provider catalogs across launches.
+- Refine provider setup and provider/model preferences in settings.
+- Improve Markdown correctness, accessibility and incremental rendering while assistant output streams;
+  add targeted rendering tests and document QA coverage.
+- Add focused regression coverage for workspace identity, session stores, file browsing and attachment UI.
 
 ## 1.0.0 — 2026-10-18
 
